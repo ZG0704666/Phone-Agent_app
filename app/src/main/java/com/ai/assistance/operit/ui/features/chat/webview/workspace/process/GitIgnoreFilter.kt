@@ -11,7 +11,7 @@ object GitIgnoreFilter {
     private const val TAG = "GitIgnoreFilter"
     
     // 默认需要排除的目录（即使 .gitignore 中没有）
-    private val DEFAULT_EXCLUDES = setOf(".backup")
+    private val DEFAULT_EXCLUDES = setOf(".backup", ".operit")
     
     /**
      * 从工作区目录加载 .gitignore 规则
@@ -23,13 +23,13 @@ object GitIgnoreFilter {
         rules.addAll(DEFAULT_EXCLUDES)
         
         try {
-            val gitignoreFile = File(workspaceDir.parentFile, ".gitignore")
+            val gitignoreFile = File(workspaceDir, ".gitignore")
             if (gitignoreFile.exists() && gitignoreFile.isFile) {
                 gitignoreFile.readLines()
                     .map { it.trim() }
                     .filter { it.isNotEmpty() && !it.startsWith("#") } // 排除空行和注释
                     .forEach { rules.add(it) }
-                Log.d(TAG, "已加载 ${rules.size} 条规则")
+                Log.d(TAG, "已加载 ${rules.size} 条规则 from ${gitignoreFile.absolutePath}")
             } else {
                 Log.d(TAG, ".gitignore 文件不存在，仅使用默认排除规则")
             }

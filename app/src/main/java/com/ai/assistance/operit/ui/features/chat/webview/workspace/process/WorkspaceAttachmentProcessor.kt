@@ -82,10 +82,15 @@ object WorkspaceAttachmentProcessor {
             // 通用建议：先了解项目再修改
             suggestions.add("对于用户意图，建议先使用 grep_context（基于意图搜索相关文件）和 grep_code（搜索特定代码模式）工具去了解项目当前情况，再进行修改。")
             
-            // 检查工作区中是否有HTML文件
-            val hasHtmlFiles = workspaceDir.walkTopDown()
-                .filter { it.isFile }
-                .any { it.extension.lowercase() == "html" || it.extension.lowercase() == "htm" }
+            // 加载 gitignore 规则
+            val ignoreRules = GitIgnoreFilter.loadRules(workspaceDir)
+            
+            // 只检查根目录文件，避免深度遍历
+            val hasHtmlFiles = workspaceDir.listFiles()
+                ?.filter { !GitIgnoreFilter.shouldIgnore(it, workspaceDir, ignoreRules) }
+                ?.filter { it.isFile }
+                ?.any { it.extension.lowercase() == "html" || it.extension.lowercase() == "htm" }
+                ?: false
             
             // 只有在有HTML文件时才显示H5相关建议
             if (hasHtmlFiles) {
@@ -165,7 +170,7 @@ object WorkspaceAttachmentProcessor {
     }
 
     /**
-     * 遍历文件系统，获取当前工作区的完整状态
+     * 获取根目录文件状态（仅扫描根目录，不深度遍历）
      */
     private fun getCurrentWorkspaceState(workspacePath: String): List<FileMetadata> {
         val workspaceDir = File(workspacePath)
@@ -176,26 +181,18 @@ object WorkspaceAttachmentProcessor {
         // 加载 gitignore 规则
         val ignoreRules = GitIgnoreFilter.loadRules(workspaceDir)
         
-        // 遍历所有文件和目录，并转换为FileMetadata列表
-        return workspaceDir.walkTopDown()
-            .onEnter { dir -> 
-                // 使用 gitignore 规则判断是否进入目录
-                !GitIgnoreFilter.shouldIgnore(dir, workspaceDir, ignoreRules)
-            }
-            .filter { it != workspaceDir } // 排除根目录本身
-            .filter { file ->
-                // 过滤应该被忽略的文件
-                !GitIgnoreFilter.shouldIgnore(file, workspaceDir, ignoreRules)
-            }
-            .map { file ->
+        // 只获取根目录下的直接子项，避免深度遍历
+        return workspaceDir.listFiles()
+            ?.filter { !GitIgnoreFilter.shouldIgnore(it, workspaceDir, ignoreRules) }
+            ?.map { file ->
                 FileMetadata(
-                    path = file.relativeTo(workspaceDir).path,
+                    path = file.name,
                     size = if (file.isFile) file.length() else 0,
                     lastModified = file.lastModified(),
                     isDirectory = file.isDirectory
                 )
             }
-            .toList()
+            ?: emptyList()
     }
 
     /**

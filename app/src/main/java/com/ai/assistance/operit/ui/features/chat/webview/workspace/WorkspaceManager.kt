@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
@@ -25,6 +26,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
@@ -54,6 +56,13 @@ data class FabPosition(val x: Float = 0f, val y: Float = 0f)
 val OpenFileInfo.isHtml: Boolean
     get() = name.endsWith(".html", ignoreCase = true) || name.endsWith(".htm", ignoreCase = true)
 
+/** 为[OpenFileInfo]添加扩展属性，用于判断是否为图片文件 */
+val OpenFileInfo.isImage: Boolean
+    get() {
+        val extension = name.substringAfterLast('.', "").lowercase()
+        return extension in listOf("jpg", "jpeg", "png", "gif", "bmp", "webp", "svg")
+    }
+
 /** VSCode风格的工作区管理器组件 集成了WebView预览和文件管理功能 */
 @SuppressLint("ClickableViewAccessibility")
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
@@ -69,6 +78,11 @@ fun WorkspaceManager(
     val webViewRefreshCounter by actualViewModel.webViewRefreshCounter.collectAsState()
     val coroutineScope = rememberCoroutineScope()
     val toolHandler = remember { AIToolHandler.getInstance(context) }
+    
+    // 读取工作区配置
+    val workspaceConfig = remember(workspacePath) { 
+        WorkspaceConfigReader.readConfig(workspacePath) 
+    }
 
     // 将 webViewHandler 和 webView 实例提升到 remember 中，使其在重组中保持稳定
     val webViewHandler =
@@ -95,7 +109,7 @@ fun WorkspaceManager(
                         false
                     }
                     webViewHandler.configureWebView(this, WebViewHandler.WebViewMode.WORKSPACE, "workspace_preview_webview")
-                    loadUrl("http://localhost:8093")
+                    loadUrl(workspaceConfig.preview.url.ifEmpty { "http://localhost:8093" })
                 }
             }
 
@@ -323,8 +337,8 @@ fun WorkspaceManager(
                                     .background(MaterialTheme.colorScheme.surface) // 添加背景色防止闪烁
             ) {
                 when {
-                    // 显示WebView预览
-                    currentFileIndex == -1 -> {
+                    // 显示WebView预览（仅当preview类型为browser时）
+                    currentFileIndex == -1 && workspaceConfig.preview.type == "browser" -> {
                         AndroidView(
                                 factory = { webView }, // 使用 remember 的实例
                                 update = { webView ->
@@ -333,52 +347,107 @@ fun WorkspaceManager(
                                 modifier = Modifier.fillMaxSize()
                         )
                     }
+                    // 显示命令按钮界面（当preview类型不是browser时）
+                    currentFileIndex == -1 && workspaceConfig.preview.type != "browser" -> {
+                        CommandButtonsView(
+                            config = workspaceConfig,
+                            workspacePath = workspacePath,
+                            onCommandExecute = { command ->
+                                // 在专属会话中执行命令
+                                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                                    actualViewModel.executeCommandInWorkspace(command, workspacePath)
+                                } else {
+                                    // 对于旧版本Android，显示不支持提示
+                                    Log.w("WorkspaceManager", "Terminal features require Android 8.0+")
+                                }
+                            }
+                        )
+                    }
                     // 显示打开的文件
                     currentFileIndex in openFiles.indices -> {
                         val fileInfo = openFiles[currentFileIndex]
                         val isPreviewMode = filePreviewStates[fileInfo.path] ?: false
 
-                        if (fileInfo.isHtml && isPreviewMode) {
-                            // HTML文件的预览模式也使用WebView
-                            AndroidView(
-                                    factory = { context ->
-                                        WebView(context).apply {
-                                            webViewHandler.configureWebView(this, WebViewHandler.WebViewMode.WORKSPACE, "workspace_file_preview_${fileInfo.path}")
-                                        }
-                                     },
-                                    update = { webView ->
-                                        val baseUrl = "file://${File(fileInfo.path).parent}/"
-                                        webView.loadDataWithBaseURL(
-                                                baseUrl,
-                                                fileInfo.content, // 使用最新的文件内容
-                                                "text/html",
-                                                "UTF-8",
-                                                null
-                                        )
-                                    },
-                                    modifier = Modifier.fillMaxSize()
-                            )
-                        } else {
-                            // 其他所有情况（非HTML文件，或处于编辑模式的HTML文件）都使用CodeEditor
-                            key(fileInfo.path) {
-                                val fileLanguage = LanguageDetector.detectLanguage(fileInfo.name)
-                                CodeEditor(
-                                        code = fileInfo.content,
-                                        language = fileLanguage,
-                                        onCodeChange = { newContent ->
-                                            val updatedFiles = openFiles.toMutableList()
-                                            if (currentFileIndex in updatedFiles.indices) {
-                                                val updatedFile = openFiles[currentFileIndex].copy(content = newContent)
-                                                updatedFiles[currentFileIndex] = updatedFile
-                                                openFiles = updatedFiles
-
-                                                // 将文件标记为未保存
-                                                unsavedFiles = unsavedFiles + updatedFile.path
+                        when {
+                            // 图片文件：显示图片预览
+                            fileInfo.isImage -> {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .background(Color.Black),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    AndroidView(
+                                        factory = { context ->
+                                            android.widget.ImageView(context).apply {
+                                                scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+                                                val bitmap = android.graphics.BitmapFactory.decodeFile(fileInfo.path)
+                                                setImageBitmap(bitmap)
                                             }
                                         },
-                                        modifier = Modifier.fillMaxSize(),
-                                        editorRef = { editor -> activeEditor = editor } // 传递editor引用
+                                        modifier = Modifier.fillMaxSize()
+                                    )
+                                    
+                                    // 图片信息叠加层
+                                    Surface(
+                                        modifier = Modifier
+                                            .align(Alignment.BottomStart)
+                                            .padding(16.dp),
+                                        color = Color.Black.copy(alpha = 0.7f),
+                                        shape = RoundedCornerShape(8.dp)
+                                    ) {
+                                        Text(
+                                            text = fileInfo.name,
+                                            modifier = Modifier.padding(8.dp),
+                                            color = Color.White,
+                                            style = MaterialTheme.typography.bodySmall
+                                        )
+                                    }
+                                }
+                            }
+                            // HTML文件的预览模式：使用WebView
+                            fileInfo.isHtml && isPreviewMode -> {
+                                AndroidView(
+                                        factory = { context ->
+                                            WebView(context).apply {
+                                                webViewHandler.configureWebView(this, WebViewHandler.WebViewMode.WORKSPACE, "workspace_file_preview_${fileInfo.path}")
+                                            }
+                                         },
+                                        update = { webView ->
+                                            val baseUrl = "file://${File(fileInfo.path).parent}/"
+                                            webView.loadDataWithBaseURL(
+                                                    baseUrl,
+                                                    fileInfo.content, // 使用最新的文件内容
+                                                    "text/html",
+                                                    "UTF-8",
+                                                    null
+                                            )
+                                        },
+                                        modifier = Modifier.fillMaxSize()
                                 )
+                            }
+                            // 其他所有情况：使用CodeEditor
+                            else -> {
+                                key(fileInfo.path) {
+                                    val fileLanguage = LanguageDetector.detectLanguage(fileInfo.name)
+                                    CodeEditor(
+                                            code = fileInfo.content,
+                                            language = fileLanguage,
+                                            onCodeChange = { newContent ->
+                                                val updatedFiles = openFiles.toMutableList()
+                                                if (currentFileIndex in updatedFiles.indices) {
+                                                    val updatedFile = openFiles[currentFileIndex].copy(content = newContent)
+                                                    updatedFiles[currentFileIndex] = updatedFile
+                                                    openFiles = updatedFiles
+
+                                                    // 将文件标记为未保存
+                                                    unsavedFiles = unsavedFiles + updatedFile.path
+                                                }
+                                            },
+                                            modifier = Modifier.fillMaxSize(),
+                                            editorRef = { editor -> activeEditor = editor } // 传递editor引用
+                                    )
+                                }
                             }
                         }
                     }
@@ -439,6 +508,7 @@ fun WorkspaceManager(
         ExpandableFabMenu(
             isExpanded = isFabMenuExpanded,
             onToggle = { isFabMenuExpanded = !isFabMenuExpanded },
+            exportEnabled = workspaceConfig.export.enabled,
             onExportClick = { onExportClick(File(workspacePath)) },
             onFileManagerClick = { showFileManager = true },
             onUndoClick = { activeEditor?.undo() },
@@ -540,6 +610,7 @@ fun WorkspaceManager(
 fun ExpandableFabMenu(
     isExpanded: Boolean,
     onToggle: () -> Unit,
+    exportEnabled: Boolean = true,
     onExportClick: () -> Unit,
     onFileManagerClick: () -> Unit,
     onUndoClick: () -> Unit,
@@ -605,8 +676,10 @@ fun ExpandableFabMenu(
             }
             FabMenuItem(icon = Icons.Default.Folder, text = context.getString(R.string.files), onClick = onFileManagerClick)
             Spacer(modifier = Modifier.height(12.dp))
-            FabMenuItem(icon = Icons.Default.Upload, text = context.getString(R.string.export), onClick = onExportClick)
-            Spacer(modifier = Modifier.height(12.dp))
+            if (exportEnabled) {
+                FabMenuItem(icon = Icons.Default.Upload, text = context.getString(R.string.export), onClick = onExportClick)
+                Spacer(modifier = Modifier.height(12.dp))
+            }
             FabMenuItem(icon = Icons.Default.LinkOff, text = context.getString(R.string.unbind), onClick = onUnbindClick)
             Spacer(modifier = Modifier.height(16.dp))
         }
@@ -737,6 +810,214 @@ fun VSCodeTab(
             }
             // 活动标签下划线
             Box(modifier = Modifier.fillMaxWidth().height(2.dp).background(bottomBorderColor))
+        }
+    }
+}
+
+/**
+ * 命令按钮视图组件
+ * 用于非 browser 类型的预览界面，显示 config.json 中定义的命令按钮
+ */
+@Composable
+fun CommandButtonsView(
+    config: WorkspaceConfig,
+    workspacePath: String,
+    onCommandExecute: (CommandConfig) -> Unit
+) {
+    val context = LocalContext.current
+    var showBrowserPreview by remember { mutableStateOf(false) }
+    var refreshCounter by remember { mutableStateOf(0) }
+    
+    // 如果用户切换到浏览器预览，显示 WebView
+    if (showBrowserPreview && config.preview.url.isNotEmpty()) {
+        // 使用 remember 保存 WebView 实例以便清理
+        val tempWebView = remember {
+            WebView(context).apply {
+                setOnTouchListener { v, event ->
+                    when (event.action) {
+                        MotionEvent.ACTION_DOWN ->
+                            v.parent.requestDisallowInterceptTouchEvent(true)
+                        MotionEvent.ACTION_UP ->
+                            v.parent.requestDisallowInterceptTouchEvent(false)
+                    }
+                    false
+                }
+                val handler = WebViewHandler(context)
+                handler.configureWebView(this, WebViewHandler.WebViewMode.WORKSPACE, "workspace_preview_${workspacePath.hashCode()}")
+            }
+        }
+        
+        // 每次刷新计数器改变时重新加载页面
+        LaunchedEffect(refreshCounter) {
+            tempWebView.loadUrl(config.preview.url)
+        }
+        
+        // 清理 WebView
+        DisposableEffect(Unit) {
+            onDispose {
+                tempWebView.stopLoading()
+                tempWebView.clearHistory()
+                tempWebView.removeAllViews()
+                tempWebView.destroy()
+            }
+        }
+        
+        Box(modifier = Modifier.fillMaxSize()) {
+            AndroidView(
+                factory = { tempWebView },
+                update = { webView ->
+                    webView.requestFocus()
+                },
+                modifier = Modifier.fillMaxSize()
+            )
+            
+            // 返回按钮
+            FloatingActionButton(
+                onClick = { showBrowserPreview = false },
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(16.dp)
+            ) {
+                Icon(Icons.Default.Close, contentDescription = "关闭预览")
+            }
+        }
+        return
+    }
+    
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .verticalScroll(rememberScrollState())
+            .padding(24.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        Icon(
+            imageVector = Icons.Default.Terminal,
+            contentDescription = null,
+            modifier = Modifier.size(64.dp),
+            tint = MaterialTheme.colorScheme.primary
+        )
+        
+        Text(
+            text = config.title ?: "${config.projectType.uppercase()} 项目",
+            style = MaterialTheme.typography.headlineMedium,
+            color = MaterialTheme.colorScheme.onSurface
+        )
+        
+        if (config.description != null) {
+            Text(
+                text = config.description,
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+        } else {
+            Text(
+                text = "点击下方按钮执行命令",
+                style = MaterialTheme.typography.bodyLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+        
+        Spacer(modifier = Modifier.height(16.dp))
+        
+        // 浏览器预览按钮（可选）
+        if (config.preview.showPreviewButton && config.preview.url.isNotEmpty()) {
+            Button(
+                onClick = { 
+                    showBrowserPreview = true
+                    refreshCounter++
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(56.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                )
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Visibility,
+                    contentDescription = null,
+                    modifier = Modifier.size(20.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = config.preview.previewButtonLabel,
+                    style = MaterialTheme.typography.titleMedium
+                )
+            }
+            
+            Spacer(modifier = Modifier.height(8.dp))
+            Divider()
+            Spacer(modifier = Modifier.height(8.dp))
+        }
+        
+        // 显示命令按钮
+        if (config.commands.isEmpty()) {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                )
+            ) {
+                Text(
+                    text = "暂无配置命令\n\n可以在 .operit/config.json 中添加命令按钮配置",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(32.dp)
+                )
+            }
+        } else {
+            config.commands.forEach { command ->
+                Button(
+                    onClick = { onCommandExecute(command) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(56.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer
+                    )
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.PlayArrow,
+                        contentDescription = null,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = command.label,
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                }
+            }
+        }
+        
+        Spacer(modifier = Modifier.height(16.dp))
+        
+        // 项目信息卡片
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+            )
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Text(
+                    text = "工作区路径",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = workspacePath,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+            }
         }
     }
 }

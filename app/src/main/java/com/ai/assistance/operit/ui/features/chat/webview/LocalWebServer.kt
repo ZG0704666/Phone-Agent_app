@@ -47,60 +47,6 @@ private constructor(
         const val WORKSPACE_PORT = 8093
         const val COMPUTER_PORT = 8094
 
-        private const val DEFAULT_INDEX_HTML_CONTENT = """
-        <!DOCTYPE html>
-        <html lang="zh-CN">
-        <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>Operit Web 工作空间</title>
-            <style>
-                body {
-                    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
-                    line-height: 1.6;
-                    color: #333;
-                    max-width: 800px;
-                    margin: 0 auto;
-                    padding: 20px;
-                }
-                h1 {
-                    color: #2c3e50;
-                    border-bottom: 2px solid #eaecef;
-                    padding-bottom: 10px;
-                }
-                code {
-                    background-color: #f8f8f8;
-                    padding: 3px 5px;
-                    border-radius: 3px;
-                    font-family: Consolas, Monaco, 'Andale Mono', monospace;
-                }
-                .tip {
-                    background-color: #f0f7ff;
-                    border-left: 4px solid #42b983;
-                    padding: 12px 16px;
-                    margin: 20px 0;
-                    border-radius: 0 4px 4px 0;
-                }
-            </style>
-        </head>
-        <body>
-            <h1>Operit Web 工作空间</h1>
-            <p>欢迎使用 Operit Web 工作空间！这是当前对话的专属网页环境。</p>
-            
-            <div class="tip">
-                <p>目前还没有任何网页内容。请要求 AI 创建一个网站或 Web 应用，AI 将会：</p>
-                <ol>
-                    <li>创建 HTML、CSS 和 JavaScript 文件</li>
-                    <li>生成 <code>index.html</code> 作为主页</li>
-                    <li>您可以随时按下 Web 按钮查看实时结果</li>
-                </ol>
-            </div>
-            
-            <p>这个页面会在您请求AI生成内容后自动更新。</p>
-        </body>
-        </html>
-        """
-
         @Volatile
         private var instances = mutableMapOf<ServerType, LocalWebServer>()
 
@@ -186,25 +132,6 @@ private constructor(
                 Log.e("LocalWebServer", "Failed to copy assets from '$assetDir'", e)
             }
         }
-        
-        fun ensureDirectoryExists(dir: File) {
-            if (!dir.exists()) {
-                dir.mkdirs()
-            }
-        }
-
-        /** If needed, creates a default index.html file */
-        fun createDefaultIndexHtmlIfNeeded(workspaceDir: File) {
-            val indexHtmlFile = File(workspaceDir, "index.html")
-            if (!indexHtmlFile.exists()) {
-                try {
-                    indexHtmlFile.writeText(DEFAULT_INDEX_HTML_CONTENT.trimIndent())
-                    Log.d(TAG, "Created default index.html at ${indexHtmlFile.absolutePath}")
-                } catch (e: IOException) {
-                    Log.e(TAG, "Failed to create default index.html", e)
-                }
-            }
-        }
     }
 
     private val isServerRunning = AtomicBoolean(false)
@@ -232,7 +159,7 @@ private constructor(
         // A better approach would be to create a new instance if the path changes fundamentally,
         // but for now, we'll just update the path for the WORKSPACE instance.
         this.rootPath = newWorkspacePath
-        ensureDirectoryExists(File(newWorkspacePath))
+        ensureWorkspaceDirExists(newWorkspacePath)
         Log.d(TAG, "Workspace path updated to: $rootPath")
     }
 
@@ -325,11 +252,6 @@ private constructor(
             Log.e(TAG, "Error checking file path: ${e.message}")
             false
         }
-    }
-
-    private fun createDefaultIndexHtml(): Response {
-        val injectedHtml = injectErudaIntoHtml(DEFAULT_INDEX_HTML_CONTENT)
-        return newFixedLengthResponse(Response.Status.OK, "text/html", injectedHtml)
     }
 
     private fun handleApiRequest(session: IHTTPSession): Response {

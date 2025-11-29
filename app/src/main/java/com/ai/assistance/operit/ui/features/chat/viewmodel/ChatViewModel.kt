@@ -48,8 +48,13 @@ import com.ai.assistance.operit.data.preferences.SpeechServicesPreferences
 import com.ai.assistance.operit.data.preferences.CharacterCardManager
 import com.ai.assistance.operit.util.WaifuMessageProcessor
 import com.ai.assistance.operit.ui.features.chat.webview.workspace.WorkspaceBackupManager
+import com.ai.assistance.operit.ui.features.chat.webview.workspace.CommandConfig
+import com.ai.assistance.operit.core.tools.system.Terminal
 import com.ai.assistance.operit.util.TtsCleaner
 import android.net.Uri
+import android.os.Build
+import androidx.annotation.RequiresApi
+import java.io.File
 // 使用 services/core 的 Delegate 类
 import com.ai.assistance.operit.services.core.MessageProcessingDelegate
 import com.ai.assistance.operit.services.core.ChatHistoryDelegate
@@ -96,6 +101,17 @@ class ChatViewModel(private val context: Context) : ViewModel() {
 
     // 工具权限系统
     private val toolPermissionSystem = ToolPermissionSystem.getInstance(context)
+    
+    // 终端管理器（用于执行工作区命令）
+    @RequiresApi(Build.VERSION_CODES.O)
+    private val terminal: Terminal? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        Terminal.getInstance(context)
+    } else {
+        null
+    }
+    
+    // 工作区终端会话映射表：workspacePath -> sessionId
+    private val workspaceTerminalSessions = mutableMapOf<String, String>()
 
     // 附件管理器 - 使用 services/core 版本
     private val attachmentDelegate = AttachmentDelegate(context, toolHandler)
@@ -1442,6 +1458,82 @@ class ChatViewModel(private val context: Context) : ViewModel() {
             } catch (e: Exception) {
                 Log.e(TAG, "Failed to stop web server after unbinding", e)
                 uiStateDelegate.showErrorMessage("停止Web工作空间失败: ${e.message}")
+            }
+        }
+    }
+
+    /** 在工作区中执行命令（来自 config.json 按钮） */
+    @RequiresApi(Build.VERSION_CODES.O)
+    fun executeCommandInWorkspace(command: CommandConfig, workspacePath: String) {
+        if (terminal == null) {
+            uiStateDelegate.showErrorMessage("终端功能需要 Android 8.0 或更高版本")
+            return
+        }
+
+        // 立即切换 UI，给用户即时反馈
+        if (_showWebView.value) {
+            _showWebView.value = false
+        }
+        _showAiComputer.value = true
+
+        viewModelScope.launch {
+            try {
+                Log.d(TAG, "Executing workspace command: ${command.command} in $workspacePath")
+                
+                val sessionId: String
+                val workspaceDir = File(workspacePath)
+                
+                if (command.usesDedicatedSession) {
+                    // 为长时间运行的命令创建独立会话
+                    val sessionTitle = command.sessionTitle ?: command.label
+                    val dedicatedSessionId = terminal.createSessionAndWait(sessionTitle)
+                    if (dedicatedSessionId == null) {
+                        Log.e(TAG, "Failed to create dedicated terminal session")
+                        uiStateDelegate.showErrorMessage("无法创建独立终端会话")
+                        return@launch
+                    }
+                    
+                    // 切换到工作区目录
+                    terminal.executeCommand(dedicatedSessionId, "cd \"${workspaceDir.absolutePath}\"")
+                    sessionId = dedicatedSessionId
+                    
+                    Log.d(TAG, "Created dedicated terminal session $sessionId for command: ${command.label}")
+                } else {
+                    // 使用工作区的共享会话
+                    var sharedSessionId = workspaceTerminalSessions[workspacePath]
+                    
+                    // 如果会话不存在或已关闭，创建新会话
+                    if (sharedSessionId == null || terminal.terminalState.value.sessions.none { it.id == sharedSessionId }) {
+                        val workspaceName = workspaceDir.name.take(4) // 只取前4位
+                        
+                        sharedSessionId = terminal.createSessionAndWait("Workspace: $workspaceName")
+                        if (sharedSessionId == null) {
+                            Log.e(TAG, "Failed to create workspace terminal session")
+                            uiStateDelegate.showErrorMessage("无法创建工作区终端会话")
+                            return@launch
+                        }
+                        
+                        // 保存会话 ID
+                        workspaceTerminalSessions[workspacePath] = sharedSessionId
+                        
+                        // 切换到工作区目录
+                        terminal.executeCommand(sharedSessionId, "cd \"${workspaceDir.absolutePath}\"")
+                        Log.d(TAG, "Created new workspace terminal session $sharedSessionId for $workspacePath")
+                    }
+                    
+                    sessionId = sharedSessionId
+                }
+                
+                // 切换到该会话
+                terminal.switchToSession(sessionId)
+                
+                // 执行命令（用户可以立即看到输出）
+                terminal.executeCommand(sessionId, command.command)
+                
+                Log.d(TAG, "Switched to computer view and executing command in session $sessionId")
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to execute workspace command", e)
+                uiStateDelegate.showErrorMessage("命令执行失败: ${e.message}")
             }
         }
     }
