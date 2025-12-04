@@ -557,6 +557,12 @@ class GeminiProvider(
         emitConnectionStatus("连接到Gemini服务...")
 
         while (retryCount < maxRetries) {
+            // 在循环开始时检查是否已被取消
+            if (isManuallyCancelled) {
+                logError("请求被用户取消，停止重试。")
+                throw UserCancellationException("请求已被用户取消")
+            }
+            
             try {
                 // 如果是重试，我们需要构建一个新的请求
                 val currentMessage: String

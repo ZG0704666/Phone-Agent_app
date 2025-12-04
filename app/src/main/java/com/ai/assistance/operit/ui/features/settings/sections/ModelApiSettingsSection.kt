@@ -116,6 +116,9 @@ fun ModelApiSettingsSection(
     
     // Tool Call配置状态
     var enableToolCallInput by remember(config.id) { mutableStateOf(config.enableToolCall) }
+    
+    // DeepSeek推理模式配置状态 (仅DeepSeek)
+    var enableDeepseekReasoningInput by remember(config.id) { mutableStateOf(config.enableDeepseekReasoning) }
 
     // 保存设置的通用函数
     val saveSettings = {
@@ -155,6 +158,12 @@ fun ModelApiSettingsSection(
             configManager.updateToolCall(
                     configId = config.id,
                     enableToolCall = enableToolCallInput
+            )
+            
+            // 更新 DeepSeek推理模式配置 (仅DeepSeek)
+            configManager.updateDeepseekReasoning(
+                    configId = config.id,
+                    enableDeepseekReasoning = enableDeepseekReasoningInput
             )
 
             // 刷新所有AI服务实例，确保使用最新配置
@@ -515,6 +524,16 @@ fun ModelApiSettingsSection(
                         subtitle = stringResource(R.string.enable_tool_call_desc),
                             checked = enableToolCallInput,
                             onCheckedChange = { enableToolCallInput = it }
+                    )
+            }
+            
+            // DeepSeek推理模式开关 (仅DeepSeek)
+            if (selectedApiProvider == ApiProviderType.DEEPSEEK) {
+                SettingsSwitchRow(
+                        title = stringResource(R.string.enable_deepseek_reasoning),
+                        subtitle = stringResource(R.string.enable_deepseek_reasoning_desc),
+                            checked = enableDeepseekReasoningInput,
+                            onCheckedChange = { enableDeepseekReasoningInput = it }
                     )
             }
 

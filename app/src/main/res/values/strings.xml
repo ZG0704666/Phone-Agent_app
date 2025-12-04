@@ -2538,6 +2538,8 @@
     <string name="enable_google_search_desc">启用后，Gemini 将使用 Google 搜索来增强回答（可能产生额外费用）</string>
     <string name="enable_tool_call">启用 Tool Call 接口调用工具</string>
     <string name="enable_tool_call_desc">关闭时，会使用软件内工具调用机制，也可以完成工具调用。开启后，将会使用API的专用接口进行原生工具调用（需要模型支持）</string>
+    <string name="enable_deepseek_reasoning">启用 DeepSeek 推理模式</string>
+    <string name="enable_deepseek_reasoning_desc">启用后，&lt;think&gt;标签内的内容将作为reasoning_content发送给DeepSeek模型，用于支持DeepSeek-R1等推理模型的工具调用</string>
     <string name="search_sources">搜索来源</string>
     <string name="api_settings_saved">API设置已保存</string>
     <string name="save_api_settings">保存API设置</string>

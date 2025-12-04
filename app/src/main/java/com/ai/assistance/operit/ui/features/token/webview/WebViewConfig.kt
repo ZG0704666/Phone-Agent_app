@@ -9,7 +9,9 @@ import android.view.ViewGroup
 import android.webkit.ConsoleMessage
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceRequest
 import android.webkit.WebView
+import android.webkit.WebViewClient
 
 /** WebView配置相关工具类 */
 object WebViewConfig {
@@ -66,25 +68,6 @@ object WebViewConfig {
             // Enable WebView debugging
             WebView.setWebContentsDebuggingEnabled(true)
 
-            // 添加触摸事件拦截，防止父视图拦截WebView的垂直滑动
-            setOnTouchListener { v, event ->
-                // 检测垂直滚动
-                if (event.action == MotionEvent.ACTION_MOVE) {
-                    // 当检测到垂直移动时，告诉父视图不要拦截事件
-                    if (Math.abs(event.y) > Math.abs(event.x)) {
-                        v.parent?.requestDisallowInterceptTouchEvent(true)
-                    }
-                } else if (event.action == MotionEvent.ACTION_UP ||
-                                event.action == MotionEvent.ACTION_CANCEL
-                ) {
-                    // 触摸结束时恢复正常事件传递
-                    v.parent?.requestDisallowInterceptTouchEvent(false)
-                }
-
-                // 返回false表示WebView仍然需要处理这个事件
-                false
-            }
-
             // 为了确保正确处理滚动，设置嵌套滚动启用
             isNestedScrollingEnabled = true
 
@@ -98,6 +81,53 @@ object WebViewConfig {
             // Add console logger
             setWebChromeClient(
                     object : WebChromeClient() {
+                        override fun onCreateWindow(
+                            view: WebView?,
+                            isDialog: Boolean,
+                            isUserGesture: Boolean,
+                            resultMsg: android.os.Message?
+                        ): Boolean {
+                            val newWebView = WebView(view?.context ?: return false)
+                            newWebView.webViewClient = object : WebViewClient() {
+                                override fun shouldOverrideUrlLoading(
+                                    w: WebView?,
+                                    request: WebResourceRequest?
+                                ): Boolean {
+                                    request?.url?.let { uri ->
+                                        val url = uri.toString()
+                                        
+                                        // 处理特殊协议，仍然需要外部跳转
+                                        if (url.startsWith("alipays:") || 
+                                            url.startsWith("alipay:") || 
+                                            url.startsWith("weixin:") ||
+                                            url.startsWith("weixins:")) {
+                                            try {
+                                                val intent = android.content.Intent(android.content.Intent.ACTION_VIEW, uri)
+                                                intent.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                                                view?.context?.startActivity(intent)
+                                                return true
+                                            } catch (e: Exception) {
+                                                Log.e("WebViewConfig", "无法在新窗口打开外部应用: ${e.message}")
+                                            }
+                                            return true
+                                        }
+
+                                        // 对于普通链接，强制在当前WebView（发起者）中加载，而不是打开外部浏览器
+                                        // 这样实现了"在内置webview打开"的需求
+                                        view?.post {
+                                            view.loadUrl(url)
+                                        }
+                                        return true
+                                    }
+                                    return false
+                                }
+                            }
+                            val transport = resultMsg?.obj as? WebView.WebViewTransport
+                            transport?.webView = newWebView
+                            resultMsg?.sendToTarget()
+                            return true
+                        }
+
                         override fun onConsoleMessage(consoleMessage: ConsoleMessage): Boolean {
                             Log.d(
                                     "WebViewConsole",

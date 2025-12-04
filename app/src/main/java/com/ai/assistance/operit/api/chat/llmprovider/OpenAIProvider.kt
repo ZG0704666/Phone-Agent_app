@@ -65,12 +65,12 @@ import org.json.JSONObject
 open class OpenAIProvider(
     private val apiEndpoint: String,
     private val apiKeyProvider: ApiKeyProvider,
-    private val modelName: String,
+    val modelName: String,
     private val client: OkHttpClient,
     private val customHeaders: Map<String, String> = emptyMap(),
     private val providerType: ApiProviderType = ApiProviderType.OPENAI,
     protected val supportsVision: Boolean = false, // 是否支持图片处理
-    private val enableToolCall: Boolean = false // 是否启用Tool Call接口
+    val enableToolCall: Boolean = false // 是否启用Tool Call接口
 ) : AIService {
     // private val client: OkHttpClient = HttpClientFactory.instance
 
@@ -275,7 +275,7 @@ open class OpenAIProvider(
      * @param text 要处理的文本内容
      * @return 纯文本字符串或包含图片和文本的JSONArray
      */
-    private fun buildContentField(text: String): Any {
+    fun buildContentField(text: String): Any {
         // 如果模型不支持图片，移除所有图片链接，只保留文本
         if (!supportsVision) {
             if (ImageLinkParser.hasImageLinks(text)) {
@@ -502,7 +502,7 @@ open class OpenAIProvider(
     /**
      * 从ToolPrompt列表构建Tool Call的JSON Schema定义
      */
-    private fun buildToolDefinitions(toolPrompts: List<ToolPrompt>): JSONArray {
+    fun buildToolDefinitions(toolPrompts: List<ToolPrompt>): JSONArray {
         val tools = JSONArray()
         
         for (tool in toolPrompts) {
@@ -830,7 +830,7 @@ open class OpenAIProvider(
      * 解析XML格式的tool调用，转换为OpenAI Tool Call格式
      * @return Pair<文本内容, tool_calls数组>
      */
-    private fun parseXmlToolCalls(content: String): Pair<String, JSONArray?> {
+    fun parseXmlToolCalls(content: String): Pair<String, JSONArray?> {
         val toolPattern = Regex("<tool\\s+name=\"([^\"]+)\">([\\s\\S]*?)</tool>", RegexOption.MULTILINE)
         val matches = toolPattern.findAll(content)
         
@@ -882,7 +882,7 @@ open class OpenAIProvider(
      * 解析XML格式的tool_result，转换为OpenAI Tool消息格式
      * @return List<Pair<tool_call_id, result_content>>
      */
-    private fun parseXmlToolResults(content: String): Pair<String, List<Pair<String, String>>?> {
+    fun parseXmlToolResults(content: String): Pair<String, List<Pair<String, String>>?> {
         // 匹配带属性的tool_result标签，例如: <tool_result name="..." status="...">...</tool_result>
         val resultPattern = Regex("<tool_result[^>]*>([\\s\\S]*?)</tool_result>", RegexOption.MULTILINE)
         val matches = resultPattern.findAll(content)
@@ -966,6 +966,9 @@ open class OpenAIProvider(
         val receivedContent = StringBuilder()
 
         while (retryCount < maxRetries) {
+            // 在循环开始时检查是否已被取消
+            checkCancellation()
+            
             try {
                 // 如果是重试，我们需要构建一个新的请求
                 val currentMessage: String
@@ -985,15 +988,12 @@ open class OpenAIProvider(
                 }
 
 
-                Log.d("AIService", "【发送消息】标准化聊天历史记录，原始大小: ${currentHistory.size}")
-                val standardizedHistory = ChatUtils.mapChatHistoryToStandardRoles(currentHistory)
-                Log.d("AIService", "【发送消息】历史记录标准化完成，标准化后大小: ${standardizedHistory.size}")
-
                 Log.d(
                         "AIService",
                         "【发送消息】准备构建请求体，模型参数数量: ${modelParameters.size}，已启用参数: ${modelParameters.count { it.isEnabled }}"
                 )
-                val requestBody = createRequestBody(currentMessage, standardizedHistory, modelParameters, enableThinking, stream, availableTools)
+                // 直接传递原始历史记录给createRequestBody，让具体的Provider决定如何处理（例如Deepseek需要保留<think>标签）
+                val requestBody = createRequestBody(currentMessage, currentHistory, modelParameters, enableThinking, stream, availableTools)
                 onTokensUpdated(tokenCacheManager.totalInputTokenCount, tokenCacheManager.cachedInputTokenCount, tokenCacheManager.outputTokenCount)
                 val request = createRequest(requestBody)
                 Log.d("AIService", "【发送消息】请求体构建完成，目标模型: $modelName，API端点: $apiEndpoint")
@@ -1087,6 +1087,14 @@ open class OpenAIProvider(
                                                         // 累积流式Tool Call数据并流式输出
                                                         val toolCallsDeltas = delta.optJSONArray("tool_calls")
                                                         if (toolCallsDeltas != null && toolCallsDeltas.length() > 0 && enableToolCall) {
+                                                            // 如果正在思考模式，收到工具调用时应先关闭思考标签
+                                                            if (isInReasoningMode) {
+                                                                isInReasoningMode = false
+                                                                emitter.emitTag("</think>")
+                                                                // 重置标记，以便后续如果有思考内容可以再次输出<think>
+                                                                hasEmittedThinkStart = false
+                                                            }
+
                                                             for (i in 0 until toolCallsDeltas.length()) {
                                                                 val deltaCall = toolCallsDeltas.getJSONObject(i)
                                                                 val index = deltaCall.optInt("index", -1)
@@ -1200,6 +1208,7 @@ open class OpenAIProvider(
                                                             if (isInReasoningMode) {
                                                                 isInReasoningMode = false
                                                                 emitter.emitTag("</think>")
+                                                                hasEmittedThinkStart = false
                                                             }
 
                                                             // 当收到第一个有效内容时，标记不再是首次响应

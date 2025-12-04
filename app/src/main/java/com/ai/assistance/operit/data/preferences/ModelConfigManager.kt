@@ -398,6 +398,14 @@ class ModelConfigManager(private val context: Context) {
         return updatedConfig
     }
 
+    // 更新 DeepSeek推理模式 配置
+    suspend fun updateDeepseekReasoning(configId: String, enableDeepseekReasoning: Boolean): ModelConfigData {
+        val config = getModelConfigFlow(configId).first()
+        val updatedConfig = config.copy(enableDeepseekReasoning = enableDeepseekReasoning)
+        saveConfigToDataStore(updatedConfig)
+        return updatedConfig
+    }
+
     suspend fun updateContextSettings(
             configId: String,
             contextLength: Float,

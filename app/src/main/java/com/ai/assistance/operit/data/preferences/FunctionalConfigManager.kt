@@ -96,8 +96,8 @@ class FunctionalConfigManager(private val context: Context) {
     suspend fun initializeIfNeeded() {
         val mapping = functionConfigMappingWithIndexFlow.first()
 
-        // 如果映射为空，创建默认映射
-        if (mapping.isEmpty() || mapping.values.all { it.configId == DEFAULT_CONFIG_ID }) {
+        // 只在映射真正为空时才创建默认映射，避免覆盖用户已保存的modelIndex
+        if (mapping.isEmpty()) {
             val defaultMapping = FunctionType.values().associateWith { FunctionConfigMapping(DEFAULT_CONFIG_ID, 0) }
             saveFunctionConfigMappingWithIndex(defaultMapping)
         }

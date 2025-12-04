@@ -119,8 +119,8 @@ object AIServiceFactory {
             ApiProviderType.BAICHUAN -> OpenAIProvider(config.apiEndpoint, apiKeyProvider, config.modelName, httpClient, customHeaders, config.apiProviderType, supportsVision, enableToolCall)
             ApiProviderType.MOONSHOT -> OpenAIProvider(config.apiEndpoint, apiKeyProvider, config.modelName, httpClient, customHeaders, config.apiProviderType, supportsVision, enableToolCall)
 
-            // 默认使用OpenAI格式（大多数服务商兼容）
-            ApiProviderType.DEEPSEEK -> OpenAIProvider(config.apiEndpoint, apiKeyProvider, config.modelName, httpClient, customHeaders, config.apiProviderType, supportsVision, enableToolCall)
+            // DeepSeek使用专用Provider（支持推理模式）
+            ApiProviderType.DEEPSEEK -> DeepseekProvider(config.apiEndpoint, apiKeyProvider, config.modelName, httpClient, customHeaders, config.apiProviderType, supportsVision, enableToolCall, config.enableDeepseekReasoning)
             ApiProviderType.MISTRAL -> OpenAIProvider(config.apiEndpoint, apiKeyProvider, config.modelName, httpClient, customHeaders, config.apiProviderType, supportsVision, enableToolCall)
             ApiProviderType.SILICONFLOW -> QwenAIProvider(config.apiEndpoint, apiKeyProvider, config.modelName, httpClient, customHeaders, config.apiProviderType, supportsVision, enableToolCall)
             ApiProviderType.OPENROUTER -> OpenAIProvider(config.apiEndpoint, apiKeyProvider, config.modelName, httpClient, customHeaders, config.apiProviderType, supportsVision, enableToolCall)

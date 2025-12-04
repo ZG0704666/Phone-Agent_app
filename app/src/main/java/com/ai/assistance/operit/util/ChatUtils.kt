@@ -19,6 +19,27 @@ object ChatUtils {
     }
 
     /**
+     * 提取think标签内的内容（用于DeepSeek的reasoning_content）
+     * @param content 包含think标签的内容
+     * @return Pair(移除think标签后的内容, think标签内的内容)
+     */
+    fun extractThinkingContent(content: String): Pair<String, String> {
+        val thinkPattern = "<think(?:ing)?>([\\s\\S]*?)</think(?:ing)?>".toRegex(RegexOption.DOT_MATCHES_ALL)
+        val thinkMatches = thinkPattern.findAll(content)
+        
+        // 收集所有think标签内的内容
+        val thinkingContent = thinkMatches.joinToString("\n") { it.groupValues[1].trim() }
+        
+        // 移除think标签和search标签
+        val contentWithoutThink = content
+            .replace(thinkPattern, "")
+            .replace("<search>.*?(</search>|\\z)".toRegex(RegexOption.DOT_MATCHES_ALL), "")
+            .trim()
+        
+        return Pair(contentWithoutThink, thinkingContent)
+    }
+
+    /**
      * 估算给定文本的token数量
      * @param text 要估算token的文本
      * @return 估算的token数量
@@ -30,8 +51,16 @@ object ChatUtils {
         return (chineseCharCount * 1.5 + otherCharCount * 0.25).toInt()
     }
 
+    /**
+     * 将聊天历史映射为标准角色格式
+     * @param chatHistory 原始聊天历史
+     * @param extractThinking 是否提取思考内容而不是删除（用于需要reasoning_content的场景）
+     * @return 如果extractThinking=false，返回标准格式的聊天历史（assistant消息已移除思考内容）
+     *         如果extractThinking=true，返回Pair(标准格式聊天历史, 思考内容映射Map<消息索引, 思考内容>)
+     */
     fun mapChatHistoryToStandardRoles(
-            chatHistory: List<Pair<String, String>>
+            chatHistory: List<Pair<String, String>>,
+            extractThinking: Boolean = false
     ): List<Pair<String, String>> {
         return chatHistory.map { (role, content) ->
             // Map role to standard format
@@ -44,10 +73,16 @@ object ChatUtils {
                 else -> role
             }
             
-            // 对于assistant角色的消息，移除思考内容
+            // 对于assistant角色的消息，移除或保留思考内容
             val processedContent =
                     if (standardRole == "assistant" || role == "ai") {
-                        removeThinkingContent(content)
+                        if (extractThinking) {
+                            // 保留原始内容，由调用者自行处理
+                            content
+                        } else {
+                            // 移除思考内容
+                            removeThinkingContent(content)
+                        }
                     } else {
                         content
                     }
