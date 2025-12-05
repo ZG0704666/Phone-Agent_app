@@ -17,7 +17,19 @@ object MarkdownExporter {
     fun exportSingle(chatHistory: ChatHistory): String {
         val sb = StringBuilder()
         
-        // YAML Front Matter
+        // 结构化元数据注释 (简化格式)
+        // 格式: key=value, key=value
+        val metaParts = mutableListOf<String>()
+        metaParts.add("id=${chatHistory.id}")
+        metaParts.add("title=${chatHistory.title}")
+        metaParts.add("created=${chatHistory.createdAt.format(dateFormatter)}")
+        metaParts.add("updated=${chatHistory.updatedAt.format(dateFormatter)}")
+        if (chatHistory.group != null) {
+            metaParts.add("group=${chatHistory.group}")
+        }
+        sb.appendLine("<!-- chat-info: ${metaParts.joinToString(", ")} -->")
+        
+        // YAML Front Matter (保留用于兼容性和可读性)
         sb.appendLine("---")
         sb.appendLine("title: ${chatHistory.title}")
         sb.appendLine("created: ${chatHistory.createdAt.format(dateFormatter)}")
@@ -83,13 +95,29 @@ object MarkdownExporter {
      * 添加单条消息
      */
     private fun appendMessage(sb: StringBuilder, message: ChatMessage) {
-        // 角色标题
+        // 消息元数据注释 (简化格式)
+        val msgParts = mutableListOf<String>()
+        
+        // 角色直接作为第一个参数，或者使用 role=xxx
+        // 为了简洁，我们使用 role=xxx，但导入时支持简写
+        val role = if (message.sender == "user") "user" else "ai"
+        msgParts.add(role) // 简写: <!-- msg: user -->
+        
+        if (message.modelName.isNotEmpty() && message.modelName != "markdown") {
+            msgParts.add("model=${message.modelName}")
+        }
+        
+        msgParts.add("timestamp=${message.timestamp}")
+        
+        sb.appendLine("<!-- msg: ${msgParts.joinToString(", ")} -->")
+        
+        // 角色标题 (保留用于可读性)
         val roleIcon = if (message.sender == "user") "👤" else "🤖"
         val roleText = if (message.sender == "user") "User" else "Assistant"
         sb.appendLine("## $roleIcon $roleText")
         sb.appendLine()
         
-        // 消息元数据（可选）
+        // 消息元数据（可选，视觉展示）
         if (message.modelName.isNotEmpty() && message.modelName != "markdown" && message.modelName != "unknown") {
             sb.appendLine("*Model: ${message.modelName}*")
             sb.appendLine()

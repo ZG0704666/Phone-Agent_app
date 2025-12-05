@@ -205,6 +205,18 @@ class MNNLlmSession private constructor(
     }
     
     /**
+     * 取消当前的生成任务
+     * 这会立即中断正在进行的推理过程
+     */
+    fun cancel() {
+        synchronized(lock) {
+            checkValid()
+            MNNLlmNative.nativeCancel(llmPtr)
+            Log.d(TAG, "Session cancelled")
+        }
+    }
+    
+    /**
      * 设置 LLM 配置
      * @param configJson JSON 格式的配置字符串
      * @return 是否设置成功

@@ -12,6 +12,8 @@
 #include <android/log.h>
 #include <fstream>
 #include <sstream>
+#include <map>
+#include <mutex>
 
 // MNN LLM headers
 #include <MNN/expr/Expr.hpp>
@@ -25,6 +27,33 @@
 
 using namespace MNN;
 using namespace MNN::Transformer;
+
+// =======================
+// Cancellation Support
+// =======================
+
+// 全局取消标志映射 (llmPtr -> shouldCancel)
+static std::mutex gCancelMutex;
+static std::map<jlong, bool> gCancelFlags;
+
+// 设置取消标志
+void setCancelFlag(jlong llmPtr, bool value) {
+    std::lock_guard<std::mutex> lock(gCancelMutex);
+    gCancelFlags[llmPtr] = value;
+}
+
+// 检查取消标志
+bool checkCancelFlag(jlong llmPtr) {
+    std::lock_guard<std::mutex> lock(gCancelMutex);
+    auto it = gCancelFlags.find(llmPtr);
+    return (it != gCancelFlags.end()) && it->second;
+}
+
+// 清除取消标志
+void clearCancelFlag(jlong llmPtr) {
+    std::lock_guard<std::mutex> lock(gCancelMutex);
+    gCancelFlags.erase(llmPtr);
+}
 
 // =======================
 // Helper Functions
@@ -222,6 +251,7 @@ struct StreamContext {
     jmethodID onTokenMethod;
     std::string buffer;
     bool shouldStop = false;
+    jlong llmPtr = 0;  // 添加 llm 指针用于检查取消标志
 };
 
 extern "C" JNIEXPORT jboolean JNICALL
@@ -303,6 +333,10 @@ Java_com_ai_assistance_mnn_MNNLlmNative_nativeGenerateStream(
         context.jvm = jvm;
         context.callbackGlobalRef = callbackGlobalRef;
         context.onTokenMethod = onTokenMethod;
+        context.llmPtr = llmPtr;
+        
+        // 清除之前的取消标志
+        setCancelFlag(llmPtr, false);
         
         // 创建自定义 ostream 来捕获输出（仿照 MNN 官方 LlmStreamBuffer 实现）
         class CallbackStream : public std::streambuf {
@@ -371,7 +405,12 @@ Java_com_ai_assistance_mnn_MNNLlmNative_nativeGenerateStream(
         protected:
             // 只重写 xsputn，不重写 overflow
             virtual std::streamsize xsputn(const char* s, std::streamsize n) override {
-                if (mContext->shouldStop || n <= 0) {
+                // 检查取消标志或 shouldStop
+                if (mContext->shouldStop || checkCancelFlag(mContext->llmPtr) || n <= 0) {
+                    if (checkCancelFlag(mContext->llmPtr)) {
+                        __android_log_print(ANDROID_LOG_DEBUG, TAG, "Generation cancelled by user");
+                        mContext->shouldStop = true;
+                    }
                     return 0;
                 }
                 
@@ -432,10 +471,11 @@ Java_com_ai_assistance_mnn_MNNLlmNative_nativeGenerateStream(
             callbackBuf.flushToCallback();
         }
         
-        // 清理全局引用
+        // 清理全局引用和取消标志
         if (callbackGlobalRef != nullptr) {
             env->DeleteGlobalRef(callbackGlobalRef);
         }
+        clearCancelFlag(llmPtr);
         
         LOGI("Stream generation completed");
         return JNI_TRUE;
@@ -445,14 +485,31 @@ Java_com_ai_assistance_mnn_MNNLlmNative_nativeGenerateStream(
         if (callbackGlobalRef != nullptr) {
             env->DeleteGlobalRef(callbackGlobalRef);
         }
+        clearCancelFlag(llmPtr);
         return JNI_FALSE;
     } catch (...) {
         LOGE("Unknown exception in generateStream");
         if (callbackGlobalRef != nullptr) {
             env->DeleteGlobalRef(callbackGlobalRef);
         }
+        clearCancelFlag(llmPtr);
         return JNI_FALSE;
     }
+}
+
+// =======================
+// Cancel Generation
+// =======================
+
+extern "C" JNIEXPORT void JNICALL
+Java_com_ai_assistance_mnn_MNNLlmNative_nativeCancel(
+    JNIEnv* env, jclass clazz, jlong llmPtr) {
+    
+    if (llmPtr == 0) return;
+    
+    LOGD("Cancelling generation for LLM at %p", reinterpret_cast<void*>(llmPtr));
+    setCancelFlag(llmPtr, true);
+    LOGI("Cancellation flag set for LLM");
 }
 
 // =======================

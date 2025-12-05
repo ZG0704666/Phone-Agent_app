@@ -120,15 +120,26 @@ object ChatFormatDetector {
     private fun isMarkdownFormat(content: String): Boolean {
         val lines = content.lines()
         
+        // 检测新版注释标记 (强匹配)
+        val hasCommentMarkers = lines.any {
+            val trimmed = it.trim()
+            trimmed.startsWith("<!-- chat-info:") || trimmed.startsWith("<!-- msg:")
+        }
+        
+        if (hasCommentMarkers) {
+            return true
+        }
+        
         // 检测是否包含 Markdown 标题
         val hasMarkdownHeaders = lines.any { 
             it.trim().startsWith("#") 
         }
         
-        // 检测是否包含常见的对话标记
+        // 检测是否包含常见的对话标记 (严格匹配)
+        // 只匹配: ## Role 或 ## Role: 且整行只能有这些内容
         val hasDialogueMarkers = lines.any { line ->
             val trimmed = line.trim()
-            trimmed.matches(Regex("^##\\s*(User|Assistant|AI|用户|助手|🤖|👤).*", RegexOption.IGNORE_CASE))
+            trimmed.matches(Regex("^##\\s*(User|Assistant|AI|System|Model|用户|助手|系统|模型)[:：]?\\s*$", RegexOption.IGNORE_CASE))
         }
         
         return hasMarkdownHeaders && hasDialogueMarkers

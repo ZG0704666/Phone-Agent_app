@@ -44,6 +44,12 @@ import kotlinx.coroutines.withContext
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
+import java.io.BufferedOutputStream
+import java.io.ByteArrayOutputStream
+import java.io.FileOutputStream
+import java.util.zip.ZipEntry
+import java.util.zip.ZipInputStream
+import java.util.zip.ZipOutputStream
 
 // 仅保留这个DataStore用于存储当前聊天ID
 private val Context.currentChatIdDataStore by preferencesDataStore(name = "current_chat_id")
@@ -52,15 +58,16 @@ class ChatHistoryManager private constructor(private val context: Context) {
     companion object {
         private const val TAG = "ChatHistoryManager"
 
-        @Volatile private var INSTANCE: ChatHistoryManager? = null
+        @Volatile
+        private var INSTANCE: ChatHistoryManager? = null
 
         fun getInstance(context: Context): ChatHistoryManager {
             return INSTANCE
-                    ?: synchronized(this) {
-                        val instance = ChatHistoryManager(context.applicationContext)
-                        INSTANCE = instance
-                        instance
-                    }
+                ?: synchronized(this) {
+                    val instance = ChatHistoryManager(context.applicationContext)
+                    INSTANCE = instance
+                    instance
+                }
         }
     }
 
@@ -95,52 +102,53 @@ class ChatHistoryManager private constructor(private val context: Context) {
     // 辅助函数：将ChatEntity转换为ChatHistory
     private fun ChatEntity.toChatHistory(): ChatHistory {
         val createdAt = Instant.ofEpochMilli(this.createdAt)
-                .atZone(ZoneId.systemDefault())
-                .toLocalDateTime()
+            .atZone(ZoneId.systemDefault())
+            .toLocalDateTime()
 
         val updatedAt = Instant.ofEpochMilli(this.updatedAt)
-                .atZone(ZoneId.systemDefault())
-                .toLocalDateTime()
+            .atZone(ZoneId.systemDefault())
+            .toLocalDateTime()
 
         return ChatHistory(
-                id = this.id,
-                title = this.title,
-                messages = emptyList(), // 关键改动：不加载完整消息，以提高侧边栏性能
-                createdAt = createdAt,
-                updatedAt = updatedAt,
-                inputTokens = this.inputTokens,
-                outputTokens = this.outputTokens,
-                currentWindowSize = this.currentWindowSize,
-                group = this.group, // 映射group字段
-                displayOrder = this.displayOrder,
-                workspace = this.workspace, // 映射workspace字段
-                parentChatId = this.parentChatId, // 映射parentChatId字段
-                characterCardName = this.characterCardName // 映射characterCardName字段
+            id = this.id,
+            title = this.title,
+            messages = emptyList(), // 关键改动：不加载完整消息，以提高侧边栏性能
+            createdAt = createdAt,
+            updatedAt = updatedAt,
+            inputTokens = this.inputTokens,
+            outputTokens = this.outputTokens,
+            currentWindowSize = this.currentWindowSize,
+            group = this.group, // 映射group字段
+            displayOrder = this.displayOrder,
+            workspace = this.workspace, // 映射workspace字段
+            parentChatId = this.parentChatId, // 映射parentChatId字段
+            characterCardName = this.characterCardName // 映射characterCardName字段
         )
     }
 
     // 获取所有聊天历史（转换为UI层需要的ChatHistory对象）
     private val _chatHistoriesFlow: Flow<List<ChatHistory>> =
-    // 使用原始的Flow方式，这样可以确保数据库变化时会自动刷新
-    chatDao.getAllChats().map { chatEntities ->
-                // Log.d(TAG, "加载聊天列表，共 ${chatEntities.size} 个聊天")
+        // 使用原始的Flow方式，这样可以确保数据库变化时会自动刷新
+        chatDao.getAllChats().map { chatEntities ->
+            // Log.d(TAG, "加载聊天列表，共 ${chatEntities.size} 个聊天")
 
-                // 使用withContext将处理移至IO线程
-                kotlinx.coroutines.withContext(Dispatchers.IO) {
-                    chatEntities.map { it.toChatHistory() }
-                }
+            // 使用withContext将处理移至IO线程
+            kotlinx.coroutines.withContext(Dispatchers.IO) {
+                chatEntities.map { it.toChatHistory() }
             }
+        }
 
     // 转换为StateFlow以便共享
     val chatHistoriesFlow =
-            _chatHistoriesFlow.stateIn(
-                    CoroutineScope(Dispatchers.IO + SupervisorJob()),
-                    SharingStarted.Lazily,
-                    emptyList()
-            )
+        _chatHistoriesFlow.stateIn(
+            CoroutineScope(Dispatchers.IO + SupervisorJob()),
+            SharingStarted.Lazily,
+            emptyList()
+        )
 
     // 角色卡聊天统计
-    val characterCardStatsFlow: Flow<List<CharacterCardChatStats>> = chatDao.getCharacterCardChatStats()
+    val characterCardStatsFlow: Flow<List<CharacterCardChatStats>> =
+        chatDao.getCharacterCardChatStats()
 
     /**
      * 根据角色卡过滤聊天历史
@@ -148,7 +156,10 @@ class ChatHistoryManager private constructor(private val context: Context) {
      * @param isDefault 是否为默认角色卡
      * @return 过滤后的聊天历史Flow
      */
-    fun getChatHistoriesByCharacterCard(characterCardName: String, isDefault: Boolean): Flow<List<ChatHistory>> {
+    fun getChatHistoriesByCharacterCard(
+        characterCardName: String,
+        isDefault: Boolean
+    ): Flow<List<ChatHistory>> {
         val sourceFlow = if (isDefault) {
             // 默认角色卡：显示该角色卡名称的对话 + 所有characterCardName为null的对话
             chatDao.getChatsByCharacterCardOrNull(characterCardName)
@@ -156,7 +167,7 @@ class ChatHistoryManager private constructor(private val context: Context) {
             // 非默认角色卡：只显示该角色卡名称的对话
             chatDao.getChatsByCharacterCard(characterCardName)
         }
-        
+
         return sourceFlow.map { chatEntities ->
             kotlinx.coroutines.withContext(Dispatchers.IO) {
                 chatEntities.map { it.toChatHistory() }
@@ -166,23 +177,23 @@ class ChatHistoryManager private constructor(private val context: Context) {
 
     // 获取当前聊天ID
     private val _currentChatIdFlow: Flow<String?> =
-            context.currentChatIdDataStore.data
-                    .catch { exception ->
-                        if (exception is IOException) {
-                            emit(emptyPreferences())
-                        } else {
-                            throw exception
-                        }
-                    }
-                    .map { preferences -> preferences[PreferencesKeys.CURRENT_CHAT_ID] }
+        context.currentChatIdDataStore.data
+            .catch { exception ->
+                if (exception is IOException) {
+                    emit(emptyPreferences())
+                } else {
+                    throw exception
+                }
+            }
+            .map { preferences -> preferences[PreferencesKeys.CURRENT_CHAT_ID] }
 
     // 转换为StateFlow以便共享
     val currentChatIdFlow =
-            _currentChatIdFlow.stateIn(
-                    CoroutineScope(Dispatchers.IO + SupervisorJob()),
-                    SharingStarted.Lazily,
-                    null
-            )
+        _currentChatIdFlow.stateIn(
+            CoroutineScope(Dispatchers.IO + SupervisorJob()),
+            SharingStarted.Lazily,
+            null
+        )
 
     // 保存聊天历史
     suspend fun saveChatHistory(history: ChatHistory) {
@@ -199,9 +210,9 @@ class ChatHistoryManager private constructor(private val context: Context) {
 
                 // 批量插入所有消息
                 val messageEntities =
-                        history.messages.mapIndexed { index, message ->
-                            MessageEntity.fromChatMessage(chatEntity.id, message, index)
-                        }
+                    history.messages.mapIndexed { index, message ->
+                        MessageEntity.fromChatMessage(chatEntity.id, message, index)
+                    }
                 messageDao.insertMessages(messageEntities)
             } catch (e: Exception) {
                 throw e
@@ -214,52 +225,53 @@ class ChatHistoryManager private constructor(private val context: Context) {
         mutex.withLock {
             try {
                 val messageToPersist =
-                        if (position != null) {
-                            val messages =
-                                    messageDao.getMessagesForChat(
-                                            chatId
-                                    ) // Already ordered by timestamp
-                            if (messages.isEmpty()) {
-                                message
-                            } else {
-                                val validPosition = position.coerceIn(0, messages.size)
-                                val newTimestamp =
-                                        when {
-                                            validPosition == 0 -> messages.first().timestamp - 1
-                                            validPosition >= messages.size ->
-                                                    messages.last().timestamp + 1
-                                            else -> {
-                                                val before = messages[validPosition - 1].timestamp
-                                                val after = messages[validPosition].timestamp
-                                                // Take the average to find a point in between.
-                                                // This assumes timestamps have enough space.
-                                                before + (after - before) / 2
-                                            }
-                                        }
-                                message.copy(timestamp = newTimestamp)
-                            }
-                        } else {
+                    if (position != null) {
+                        val messages =
+                            messageDao.getMessagesForChat(
+                                chatId
+                            ) // Already ordered by timestamp
+                        if (messages.isEmpty()) {
                             message
+                        } else {
+                            val validPosition = position.coerceIn(0, messages.size)
+                            val newTimestamp =
+                                when {
+                                    validPosition == 0 -> messages.first().timestamp - 1
+                                    validPosition >= messages.size ->
+                                        messages.last().timestamp + 1
+
+                                    else -> {
+                                        val before = messages[validPosition - 1].timestamp
+                                        val after = messages[validPosition].timestamp
+                                        // Take the average to find a point in between.
+                                        // This assumes timestamps have enough space.
+                                        before + (after - before) / 2
+                                    }
+                                }
+                            message.copy(timestamp = newTimestamp)
                         }
+                    } else {
+                        message
+                    }
 
                 // Create message entity, orderIndex is no longer used for ordering.
                 val messageEntity =
-                        MessageEntity.fromChatMessage(
-                                chatId = chatId,
-                                message = messageToPersist,
-                                orderIndex = 0
-                        )
+                    MessageEntity.fromChatMessage(
+                        chatId = chatId,
+                        message = messageToPersist,
+                        orderIndex = 0
+                    )
                 messageDao.insertMessage(messageEntity)
 
                 // Update chat metadata
                 chatDao.getChatById(chatId)?.let { chat ->
                     chatDao.updateChatMetadata(
-                            chatId = chatId,
-                            title = chat.title,
-                            timestamp = System.currentTimeMillis(),
-                            inputTokens = chat.inputTokens,
-                            outputTokens = chat.outputTokens,
-                            currentWindowSize = chat.currentWindowSize
+                        chatId = chatId,
+                        title = chat.title,
+                        timestamp = System.currentTimeMillis(),
+                        inputTokens = chat.inputTokens,
+                        outputTokens = chat.outputTokens,
+                        currentWindowSize = chat.currentWindowSize
                     )
                 }
             } catch (e: Exception) {
@@ -311,7 +323,11 @@ class ChatHistoryManager private constructor(private val context: Context) {
                     chatDao.updateGroupName(oldName, newName)
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to rename group from $oldName to $newName (character: $characterCardName)", e)
+                Log.e(
+                    TAG,
+                    "Failed to rename group from $oldName to $newName (character: $characterCardName)",
+                    e
+                )
                 throw e
             }
         }
@@ -342,7 +358,11 @@ class ChatHistoryManager private constructor(private val context: Context) {
                     }
                 }
             } catch (e: Exception) {
-                Log.e(TAG, "Failed to delete group $groupName (deleteChats: $deleteChats, character: $characterCardName)", e)
+                Log.e(
+                    TAG,
+                    "Failed to delete group $groupName (deleteChats: $deleteChats, character: $characterCardName)",
+                    e
+                )
                 throw e
             }
         }
@@ -363,12 +383,12 @@ class ChatHistoryManager private constructor(private val context: Context) {
                 // Update chat metadata
                 chatDao.getChatById(chatId)?.let { chat ->
                     chatDao.updateChatMetadata(
-                            chatId = chatId,
-                            title = chat.title,
-                            timestamp = System.currentTimeMillis(),
-                            inputTokens = chat.inputTokens,
-                            outputTokens = chat.outputTokens,
-                            currentWindowSize = chat.currentWindowSize
+                        chatId = chatId,
+                        title = chat.title,
+                        timestamp = System.currentTimeMillis(),
+                        inputTokens = chat.inputTokens,
+                        outputTokens = chat.outputTokens,
+                        currentWindowSize = chat.currentWindowSize
                     )
                 }
             } catch (e: Exception) {
@@ -393,12 +413,12 @@ class ChatHistoryManager private constructor(private val context: Context) {
                     val chat = chatDao.getChatById(chatId)
                     if (chat != null) {
                         chatDao.updateChatMetadata(
-                                chatId = chatId,
-                                title = chat.title,
-                                timestamp = System.currentTimeMillis(),
-                                inputTokens = chat.inputTokens,
-                                outputTokens = chat.outputTokens,
-                                currentWindowSize = chat.currentWindowSize
+                            chatId = chatId,
+                            title = chat.title,
+                            timestamp = System.currentTimeMillis(),
+                            inputTokens = chat.inputTokens,
+                            outputTokens = chat.outputTokens,
+                            currentWindowSize = chat.currentWindowSize
                         )
                     }
                 } else {
@@ -429,12 +449,12 @@ class ChatHistoryManager private constructor(private val context: Context) {
                 // 更新聊天元数据时间戳
                 chatDao.getChatById(chatId)?.let { chat ->
                     chatDao.updateChatMetadata(
-                            chatId = chatId,
-                            title = chat.title,
-                            timestamp = System.currentTimeMillis(),
-                            inputTokens = chat.inputTokens,
-                            outputTokens = chat.outputTokens,
-                            currentWindowSize = chat.currentWindowSize
+                        chatId = chatId,
+                        title = chat.title,
+                        timestamp = System.currentTimeMillis(),
+                        inputTokens = chat.inputTokens,
+                        outputTokens = chat.outputTokens,
+                        currentWindowSize = chat.currentWindowSize
                     )
                 }
             } catch (e: Exception) {
@@ -460,12 +480,12 @@ class ChatHistoryManager private constructor(private val context: Context) {
                 // 更新聊天元数据
                 chatDao.getChatById(chatId)?.let { chat ->
                     chatDao.updateChatMetadata(
-                            chatId = chatId,
-                            title = chat.title,
-                            timestamp = System.currentTimeMillis(),
-                            inputTokens = 0,
-                            outputTokens = 0,
-                            currentWindowSize = 0
+                        chatId = chatId,
+                        title = chat.title,
+                        timestamp = System.currentTimeMillis(),
+                        inputTokens = 0,
+                        outputTokens = 0,
+                        currentWindowSize = 0
                     )
                 }
             } catch (e: Exception) {
@@ -511,12 +531,12 @@ class ChatHistoryManager private constructor(private val context: Context) {
                 val chat = chatDao.getChatById(chatId)
                 if (chat != null) {
                     chatDao.updateChatMetadata(
-                            chatId = chatId,
-                            title = chat.title,
-                            timestamp = System.currentTimeMillis(),
-                            inputTokens = inputTokens,
-                            outputTokens = outputTokens,
-                            currentWindowSize = currentWindowSize
+                        chatId = chatId,
+                        title = chat.title,
+                        timestamp = System.currentTimeMillis(),
+                        inputTokens = inputTokens,
+                        outputTokens = outputTokens,
+                        currentWindowSize = currentWindowSize
                     )
                 }
             } catch (e: Exception) {
@@ -553,13 +573,19 @@ class ChatHistoryManager private constructor(private val context: Context) {
     }
 
     // 创建新对话
-    suspend fun createNewChat(group: String? = null, inheritGroupFromChatId: String? = null, characterCardName: String? = null): ChatHistory {
+    suspend fun createNewChat(
+        group: String? = null,
+        inheritGroupFromChatId: String? = null,
+        characterCardName: String? = null
+    ): ChatHistory {
         val dateTime = LocalDateTime.now()
         val formattedTime =
-                "${dateTime.hour}:${dateTime.minute.toString().padStart(2, '0')}:${dateTime.second.toString().padStart(2, '0')}"
+            "${dateTime.hour}:${
+                dateTime.minute.toString().padStart(2, '0')
+            }:${dateTime.second.toString().padStart(2, '0')}"
 
         val localizedContext = LocaleUtils.getLocalizedContext(context)
-        
+
         // 确定新对话的分组
         val finalGroup = when {
             // 如果显式指定了分组，使用指定的分组
@@ -571,16 +597,16 @@ class ChatHistoryManager private constructor(private val context: Context) {
             // 默认为空分组（不分组）
             else -> null
         }
-        
+
         val newHistory =
-                ChatHistory(
-                        title = "${localizedContext.getString(R.string.new_conversation)} $formattedTime",
-                        messages = listOf<ChatMessage>(),
-                        inputTokens = 0,
-                        outputTokens = 0,
-                        group = finalGroup,
-                        characterCardName = characterCardName // 使用传入的角色卡名称，如果为null则不绑定
-                )
+            ChatHistory(
+                title = "${localizedContext.getString(R.string.new_conversation)} $formattedTime",
+                messages = listOf<ChatMessage>(),
+                inputTokens = 0,
+                outputTokens = 0,
+                group = finalGroup,
+                characterCardName = characterCardName // 使用传入的角色卡名称，如果为null则不绑定
+            )
 
         // 保存新聊天
         val chatEntity = ChatEntity.fromChatHistory(newHistory)
@@ -702,7 +728,10 @@ class ChatHistoryManager private constructor(private val context: Context) {
                 // 设置为当前聊天
                 setCurrentChatId(branchHistory.id)
 
-                Log.d(TAG, "创建分支对话: ${branchHistory.id}, 父对话: $parentChatId, 消息数: ${messagesToCopy.size}")
+                Log.d(
+                    TAG,
+                    "创建分支对话: ${branchHistory.id}, 父对话: $parentChatId, 消息数: ${messagesToCopy.size}"
+                )
                 branchHistory
             } catch (e: Exception) {
                 Log.e(TAG, "创建分支对话失败", e)
@@ -790,7 +819,7 @@ class ChatHistoryManager private constructor(private val context: Context) {
      */
     suspend fun exportChatHistoriesToDownloads(): String? =
         exportChatHistoriesToDownloads(ExportFormat.JSON)
-    
+
     /**
      * 导出所有聊天记录到「下载/Operit」目录（支持多种格式）
      * @param format 导出格式
@@ -817,36 +846,71 @@ class ChatHistoryManager private constructor(private val context: Context) {
 
                 val dateFormat = SimpleDateFormat("yyyy-MM-dd_HH-mm-ss", Locale.getDefault())
                 val timestamp = dateFormat.format(Date())
-                
-                // 根据格式生成文件名和内容
-                val (fileName, content) = when (format) {
+
+                val exportFile = when (format) {
+                    ExportFormat.MARKDOWN -> {
+                        val zipFile = File(exportDir, "chat_backup_$timestamp.zip")
+                        val usedNames = HashSet<String>()
+                        ZipOutputStream(BufferedOutputStream(FileOutputStream(zipFile))).use { zos ->
+                            for (history in completeHistories) {
+                                val content = MarkdownExporter.exportSingle(history)
+                                // 处理文件名中的非法字符
+                                var safeTitle = history.title.replace(Regex("[\\\\/:*?\"<>|]"), "_")
+                                // 避免文件名过长
+                                if (safeTitle.length > 50) {
+                                    safeTitle = safeTitle.substring(0, 50)
+                                }
+                                safeTitle = safeTitle.trim()
+                                
+                                // 确保文件名唯一
+                                var baseName = "$safeTitle.md"
+                                var counter = 1
+                                while (usedNames.contains(baseName)) {
+                                    baseName = "$safeTitle ($counter).md"
+                                    counter++
+                                }
+                                usedNames.add(baseName)
+
+                                zos.putNextEntry(ZipEntry(baseName))
+                                zos.write(content.toByteArray())
+                                zos.closeEntry()
+                            }
+                        }
+                        zipFile
+                    }
+
                     ExportFormat.JSON -> {
+                        val file = File(exportDir, "chat_backup_$timestamp.json")
                         val json = Json {
                             prettyPrint = true
                             encodeDefaults = true
                         }
-                        "chat_backup_$timestamp.json" to json.encodeToString(completeHistories)
+                        file.writeText(json.encodeToString(completeHistories))
+                        file
                     }
-                    ExportFormat.MARKDOWN -> {
-                        "chat_backup_$timestamp.md" to MarkdownExporter.exportMultiple(completeHistories)
-                    }
+
                     ExportFormat.HTML -> {
-                        "chat_backup_$timestamp.html" to HtmlExporter.exportMultiple(completeHistories)
+                        val file = File(exportDir, "chat_backup_$timestamp.html")
+                        file.writeText(HtmlExporter.exportMultiple(completeHistories))
+                        file
                     }
+
                     ExportFormat.TXT -> {
-                        "chat_backup_$timestamp.txt" to TextExporter.exportMultiple(completeHistories)
+                        val file = File(exportDir, "chat_backup_$timestamp.txt")
+                        file.writeText(TextExporter.exportMultiple(completeHistories))
+                        file
                     }
+
                     ExportFormat.CSV -> {
-                        // CSV 格式暂不实现，使用 JSON
-                        "chat_backup_$timestamp.json" to Json {
+                        val file = File(exportDir, "chat_backup_$timestamp.json")
+                        val json = Json {
                             prettyPrint = true
                             encodeDefaults = true
-                        }.encodeToString(completeHistories)
+                        }
+                        file.writeText(json.encodeToString(completeHistories))
+                        file
                     }
                 }
-                
-                val exportFile = File(exportDir, fileName)
-                exportFile.writeText(content)
 
                 exportFile.absolutePath
             } catch (e: Exception) {
@@ -854,7 +918,6 @@ class ChatHistoryManager private constructor(private val context: Context) {
                 null
             }
         }
-
     /**
      * 从指定URI导入聊天记录（指定格式）
      * @param uri 备份文件URI
@@ -864,18 +927,58 @@ class ChatHistoryManager private constructor(private val context: Context) {
     suspend fun importChatHistoriesFromUri(uri: Uri, format: ChatFormat): ChatImportResult =
         withContext(Dispatchers.IO) {
             try {
-                val inputStream = context.contentResolver.openInputStream(uri)
-                    ?: return@withContext ChatImportResult(0, 0, 0)
-                val content = inputStream.bufferedReader().use { it.readText() }
+                val chatHistories = mutableListOf<ChatHistory>()
+                var isZipProcessed = false
 
-                if (content.isBlank()) {
-                    throw Exception("导入的文件为空")
+                // 如果是 Markdown 格式，尝试作为 Zip 处理
+                if (format == ChatFormat.MARKDOWN) {
+                    try {
+                        context.contentResolver.openInputStream(uri)?.use { fis ->
+                            // 尝试作为 Zip 读取
+                            // 注意：ZipInputStream 可能会消耗流，如果不是 Zip，后续重读需要重新 openInputStream
+                            ZipInputStream(fis).use { zipStream ->
+                                var entry = zipStream.nextEntry
+                                if (entry != null) {
+                                    // 确实是 Zip 文件
+                                    do {
+                                        if (!entry.isDirectory && entry.name.lowercase().endsWith(".md")) {
+                                            val buffer = ByteArrayOutputStream()
+                                            val data = ByteArray(4096)
+                                            var count: Int
+                                            while (zipStream.read(data).also { count = it } != -1) {
+                                                buffer.write(data, 0, count)
+                                            }
+                                            val content = buffer.toString("UTF-8")
+                                            if (content.isNotBlank()) {
+                                                chatHistories.addAll(convertToOperitFormat(content, ChatFormat.MARKDOWN))
+                                            }
+                                        }
+                                        zipStream.closeEntry()
+                                        entry = zipStream.nextEntry
+                                    } while (entry != null)
+                                    isZipProcessed = true
+                                }
+                            }
+                        }
+                    } catch (e: Exception) {
+                        Log.w(TAG, "尝试解析 Zip 失败，将尝试作为普通文件读取: ${e.message}")
+                    }
                 }
 
-                Log.d(TAG, "使用指定格式导入: $format")
-                
-                // 转换为 ChatHistory 列表
-                val chatHistories = convertToOperitFormat(content, format)
+                if (!isZipProcessed) {
+                    val inputStream = context.contentResolver.openInputStream(uri)
+                        ?: return@withContext ChatImportResult(0, 0, 0)
+                    val content = inputStream.bufferedReader().use { it.readText() }
+
+                    if (content.isBlank()) {
+                        throw Exception("导入的文件为空")
+                    }
+
+                    Log.d(TAG, "使用指定格式导入: $format")
+                    
+                    // 转换为 ChatHistory 列表
+                    chatHistories.addAll(convertToOperitFormat(content, format))
+                }
 
                 if (chatHistories.isEmpty()) {
                     return@withContext ChatImportResult(0, 0, 0)

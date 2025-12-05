@@ -38,6 +38,7 @@ class ClaudeProvider(
 
     // 当前活跃的Call对象，用于取消流式传输
     private var activeCall: Call? = null
+    private var activeResponse: Response? = null
     @Volatile private var isManuallyCancelled = false
 
     /**
@@ -68,13 +69,28 @@ class ClaudeProvider(
     // 取消当前流式传输
     override fun cancelStreaming() {
         isManuallyCancelled = true
+
+        // 1. 强制关闭 Response（这会立即中断流读取操作）
+        activeResponse?.let {
+            try {
+                it.close()
+                Log.d("AIService", "已强制关闭Response流")
+            } catch (e: Exception) {
+                Log.w("AIService", "关闭Response时出错: ${e.message}")
+            }
+        }
+        activeResponse = null
+
+        // 2. 取消 Call
         activeCall?.let {
             if (!it.isCanceled()) {
                 it.cancel()
-                Log.d("AIService", "已取消当前流式传输")
+                Log.d("AIService", "已取消当前流式传输，Call已中断")
             }
         }
         activeCall = null
+
+        Log.d("AIService", "取消标志已设置，流读取将立即被中断")
     }
 
     // ==================== Tool Call 支持 ====================
@@ -657,7 +673,9 @@ class ClaudeProvider(
                 activeCall = call
 
                 Log.d("AIService", "正在建立连接...")
-                call.execute().use { response ->
+                val response = call.execute()
+                activeResponse = response
+                try {
                     if (!response.isSuccessful) {
                         val errorBody = response.body?.string() ?: "No error details"
                         // 对于4xx这类明确的客户端错误，直接抛出，不进行重试
@@ -896,13 +914,17 @@ class ClaudeProvider(
                             throw IOException("解析响应失败: ${e.message}", e)
                         }
                     }
-
-                    // 清理活跃Call引用
-                    activeCall = null
+                } finally {
+                    response.close()
+                    Log.d("AIService", "【Claude】关闭响应连接")
                 }
 
+                // 清理活跃引用
+                activeCall = null
+                activeResponse = null
+
                 // 成功处理后，返回
-                 Log.d( "AIService", "【Claude】请求成功完成")
+                Log.d("AIService", "【Claude】请求成功完成")
                 return@stream
             } catch (e: NonRetriableException) {
                 Log.e("AIService", "【Claude】发生不可重试错误", e)

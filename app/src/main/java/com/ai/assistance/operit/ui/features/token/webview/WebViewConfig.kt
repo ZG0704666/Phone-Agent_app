@@ -78,6 +78,16 @@ object WebViewConfig {
                             ViewGroup.LayoutParams.MATCH_PARENT
                     )
 
+            // 解决WebView和父布局之间的触摸冲突
+            setOnTouchListener {
+                v, event ->
+                when (event.action) {
+                    MotionEvent.ACTION_DOWN -> requestDisallowInterceptTouchEvent(true)
+                    MotionEvent.ACTION_UP -> requestDisallowInterceptTouchEvent(false)
+                }
+                false
+            }
+
             // Add console logger
             setWebChromeClient(
                     object : WebChromeClient() {

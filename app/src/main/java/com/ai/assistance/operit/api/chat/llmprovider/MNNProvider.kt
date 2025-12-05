@@ -77,7 +77,11 @@ class MNNProvider(
 
     override fun cancelStreaming() {
         isCancelled = true
-        Log.d(TAG, "已取消MNN推理")
+        
+        // 调用底层 native 取消方法，立即中断推理
+        llmSession?.cancel()
+        
+        Log.d(TAG, "已取消MNN推理（已通知底层中断）")
     }
 
     /**

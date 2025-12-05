@@ -48,6 +48,7 @@ class GeminiProvider(
 
     // 活跃请求，用于取消流式请求
     private var activeCall: Call? = null
+    private var activeResponse: Response? = null
     @Volatile private var isManuallyCancelled = false
 
     /**
@@ -75,13 +76,28 @@ class GeminiProvider(
     // 取消当前流式传输
     override fun cancelStreaming() {
         isManuallyCancelled = true
+
+        // 1. 强制关闭 Response（这会立即中断流读取操作）
+        activeResponse?.let {
+            try {
+                it.close()
+                Log.d(TAG, "已强制关闭Response流")
+            } catch (e: Exception) {
+                Log.w(TAG, "关闭Response时出错: ${e.message}")
+            }
+        }
+        activeResponse = null
+
+        // 2. 取消 Call
         activeCall?.let {
             if (!it.isCanceled()) {
                 it.cancel()
-                Log.d(TAG, "已取消当前流式传输")
+                Log.d(TAG, "已取消当前流式传输，Call已中断")
             }
         }
         activeCall = null
+
+        Log.d(TAG, "取消标志已设置，流读取将立即被中断")
     }
 
     // 重置Token计数
@@ -594,7 +610,9 @@ class GeminiProvider(
 
                 val startTime = System.currentTimeMillis()
                 withContext(kotlinx.coroutines.Dispatchers.IO) {
-                    call.execute().use { response ->
+                    val response = call.execute()
+                    activeResponse = response
+                    try {
                         val duration = System.currentTimeMillis() - startTime
                         Log.d(TAG, "收到初始响应, 耗时: ${duration}ms, 状态码: ${response.code}")
 
@@ -619,10 +637,15 @@ class GeminiProvider(
                             // 处理非流式响应并转换为Stream
                             processNonStreamingResponse(response, streamCollector, requestId, onTokensUpdated, receivedContent)
                         }
+                    } finally {
+                        response.close()
+                        Log.d(TAG, "关闭响应连接")
                     }
                 }
 
+                // 清理活跃引用
                 activeCall = null
+                activeResponse = null
                 return@stream
             } catch (e: NonRetriableException) {
                 logError("发生不可重试错误", e)

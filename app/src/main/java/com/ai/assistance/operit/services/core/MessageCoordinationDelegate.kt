@@ -259,7 +259,7 @@ class MessageCoordinationDelegate(
             if (success) {
                 uiStateDelegate.showToast("对话总结已生成")
             } else {
-                uiStateDelegate.showErrorMessage("生成对话总结失败")
+                uiStateDelegate.showErrorMessage("总结生成失败，请检查你的功能模型:总结模型")
             }
         }
     }
@@ -348,7 +348,7 @@ class MessageCoordinationDelegate(
             throw e // 重新抛出取消异常，让协程正确取消
         } catch (e: Exception) {
             Log.e(TAG, "生成总结时出错: ${e.message}", e)
-            uiStateDelegate.showErrorMessage("生成聊天总结时出错: ${e.message}")
+            uiStateDelegate.showErrorMessage("总结生成失败，请检查你的功能模型:总结模型")
         } finally {
             _isSummarizing.value = false
             val wasSummarizing =

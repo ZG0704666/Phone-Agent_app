@@ -103,6 +103,11 @@ class DeepseekProvider(
         val messagesArray = buildMessagesWithReasoning(message, chatHistory, effectiveEnableToolCall)
         jsonObject.put("messages", messagesArray)
 
+        // ⚠️ 重要：调用 TokenCacheManager 计算输入 token 数量
+        // 虽然 buildMessagesWithReasoning 不返回 token 计数，但我们需要更新缓存管理器的状态
+        tokenCacheManager.calculateInputTokens(message, chatHistory, toolsJson)
+        Log.d("DeepseekProvider", "Token计算完成 - 总输入: ${tokenCacheManager.totalInputTokenCount}, 缓存: ${tokenCacheManager.cachedInputTokenCount}")
+
         // 记录最终的请求体（省略过长的tools字段）
         val logJson = JSONObject(jsonObject.toString())
         if (logJson.has("tools")) {
@@ -222,32 +227,60 @@ class DeepseekProvider(
                     // 非assistant消息，使用原有逻辑
                     if (useToolCall && role == "user") {
                         val (textContent, toolResults) = parseXmlToolResults(originalContent)
-                        if (toolResults != null && toolResults.isNotEmpty()) {
-                            // 添加tool消息
-                            toolResults.forEachIndexed { index, (_, resultContent) ->
+                        
+                        // 标记是否处理了tool_call
+                        var hasHandledToolCalls = false
+
+                        if (lastToolCallIds.isNotEmpty()) {
+                            val resultsList = toolResults ?: emptyList()
+                            val resultCount = resultsList.size
+                            val callCount = lastToolCallIds.size
+
+                            // 遍历所有待处理的tool call
+                            for (i in 0 until callCount) {
+                                val toolCallId = lastToolCallIds[i]
                                 val toolMessage = JSONObject()
                                 toolMessage.put("role", "tool")
-                                val toolCallId = lastToolCallIds.getOrNull(index) ?: "call_result_$index"
                                 toolMessage.put("tool_call_id", toolCallId)
-                                toolMessage.put("content", resultContent)
-                                messagesArray.put(toolMessage)
-                                Log.d("DeepseekProvider", "历史XML→ToolResult: ID=$toolCallId, content length=${resultContent.length}")
-                            }
 
-                            if (textContent.isNotEmpty()) {
-                                val userMessage = JSONObject()
-                                userMessage.put("role", "user")
-                                userMessage.put("content", buildContentField(textContent))
-                                messagesArray.put(userMessage)
-                                Log.d("DeepseekProvider", "历史user消息有剩余文本: length=${textContent.length}, preview=${textContent.take(10)}")
-                            } else {
-                                Log.d("DeepseekProvider", "历史user消息全是tool_result，无剩余文本")
+                                if (i < resultCount) {
+                                    // 有对应的结果
+                                    val (_, resultContent) = resultsList[i]
+                                    toolMessage.put("content", resultContent)
+                                    Log.d("DeepseekProvider", "历史XML→ToolResult: ID=$toolCallId, content length=${resultContent.length}")
+                                } else {
+                                    // 没有结果，补充取消状态
+                                    toolMessage.put("content", "User cancelled")
+                                    Log.d("DeepseekProvider", "补充取消状态: ID=$toolCallId")
+                                }
+                                messagesArray.put(toolMessage)
                             }
-                        } else {
+                            
+                            hasHandledToolCalls = true
+                            
+                            // 如果有多余的tool_result，记录警告
+                            if (resultCount > callCount) {
+                                Log.w("DeepseekProvider", "发现多余的tool_result: $resultCount results vs $callCount tool_calls")
+                            }
+                            
+                            // 使用后清空
+                            lastToolCallIds.clear()
+                        }
+
+                        if (textContent.isNotEmpty()) {
+                            val userMessage = JSONObject()
+                            userMessage.put("role", "user")
+                            userMessage.put("content", buildContentField(textContent))
+                            messagesArray.put(userMessage)
+                            Log.d("DeepseekProvider", "历史user消息有剩余文本: length=${textContent.length}, preview=${textContent.take(10)}")
+                        } else if (!hasHandledToolCalls) {
+                            // 如果没有处理任何tool_call，保留原始内容
                             val historyMessage = JSONObject()
                             historyMessage.put("role", role)
                             historyMessage.put("content", buildContentField(originalContent))
                             messagesArray.put(historyMessage)
+                        } else {
+                            Log.d("DeepseekProvider", "历史user消息全是tool_result，无剩余文本")
                         }
                     } else {
                         val historyMessage = JSONObject()

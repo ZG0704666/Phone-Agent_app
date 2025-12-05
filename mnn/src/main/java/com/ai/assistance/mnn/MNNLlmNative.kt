@@ -110,6 +110,13 @@ object MNNLlmNative {
     external fun nativeSetConfig(llmPtr: Long, configJson: String): Boolean
     
     /**
+     * 取消当前的生成任务
+     * @param llmPtr LLM 指针
+     */
+    @JvmStatic
+    external fun nativeCancel(llmPtr: Long)
+    
+    /**
      * 生成回调接口
      */
     interface GenerationCallback {
