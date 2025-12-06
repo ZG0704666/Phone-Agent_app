@@ -24,8 +24,11 @@ import com.ai.assistance.operit.data.model.ToolParameter
 import com.ai.assistance.operit.ui.components.CustomScaffold
 import com.ai.assistance.operit.ui.features.chat.components.AndroidExportDialog
 import com.ai.assistance.operit.ui.features.chat.components.ExportCompleteDialog
+import com.ai.assistance.operit.ui.features.chat.components.ExportPlatformDialog
 import com.ai.assistance.operit.ui.features.chat.components.ExportProgressDialog
+import com.ai.assistance.operit.ui.features.chat.components.WindowsExportDialog
 import com.ai.assistance.operit.ui.features.chat.components.exportAndroidApp
+import com.ai.assistance.operit.ui.features.chat.components.exportWindowsApp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -45,7 +48,9 @@ fun HtmlPackagerScreen(onGoBack: () -> Unit) {
     var selectedIndexFile by remember { mutableStateOf<DocumentFile?>(null) }
     var isIndexFileDropdownExpanded by remember { mutableStateOf(false) }
 
+    var showExportPlatformDialog by remember { mutableStateOf(false) }
     var showExportDialog by remember { mutableStateOf(false) }
+    var showWindowsExportDialog by remember { mutableStateOf(false) }
     var showProgressDialog by remember { mutableStateOf(false) }
     var showCompleteDialog by remember { mutableStateOf(false) }
 
@@ -140,14 +145,28 @@ fun HtmlPackagerScreen(onGoBack: () -> Unit) {
 
             // Step 3: Package
             Button(
-                onClick = { showExportDialog = true },
+                onClick = { showExportPlatformDialog = true },
                 enabled = selectedIndexFile != null,
                 modifier = Modifier.fillMaxWidth().height(56.dp)
             ) {
                 Icon(Icons.Default.Build, contentDescription = "Package", modifier = Modifier.padding(end = 8.dp))
-                Text("生成APK安装包", style = MaterialTheme.typography.titleMedium)
+                Text("生成安装包", style = MaterialTheme.typography.titleMedium)
             }
         }
+    }
+
+    if (showExportPlatformDialog) {
+        ExportPlatformDialog(
+            onDismiss = { showExportPlatformDialog = false },
+            onSelectAndroid = {
+                showExportPlatformDialog = false
+                showExportDialog = true
+            },
+            onSelectWindows = {
+                showExportPlatformDialog = false
+                showWindowsExportDialog = true
+            }
+        )
     }
 
     if (showExportDialog && webProjectUri != null && selectedIndexFile != null) {
@@ -159,13 +178,10 @@ fun HtmlPackagerScreen(onGoBack: () -> Unit) {
                 showExportDialog = false
                 showProgressDialog = true
                 coroutineScope.launch {
-                    var tempWorkDir: File? = null
+                    val externalFilesDir = context.getExternalFilesDir(null)
+                        ?: throw IllegalStateException("External files directory not available.")
+                    val tempWorkDir = File(externalFilesDir, "html_packager_temp_${System.currentTimeMillis()}")
                     try {
-                        // 1. 创建一个位于外部文件目录的临时文件夹 (获取绝对路径)
-                        val externalFilesDir = context.getExternalFilesDir(null)
-                            ?: throw IllegalStateException("External files directory not available.")
-                        tempWorkDir = File(externalFilesDir, "html_packager_temp_${System.currentTimeMillis()}")
-
                         withContext(Dispatchers.IO) {
                             if (tempWorkDir.exists()) tempWorkDir.deleteRecursively()
                             tempWorkDir.mkdirs()
@@ -211,7 +227,70 @@ fun HtmlPackagerScreen(onGoBack: () -> Unit) {
                     } finally {
                         // 5. 无论成功与否，都清理临时文件夹
                         withContext(Dispatchers.IO) {
-                            tempWorkDir?.deleteRecursively()
+                            if (tempWorkDir.exists()) {
+                                tempWorkDir.deleteRecursively()
+                            }
+                        }
+                    }
+                }
+            }
+        )
+    }
+
+    if (showWindowsExportDialog && webProjectUri != null && selectedIndexFile != null) {
+        val workDirForDialog = context.cacheDir.resolve("windows_dialog_workdir_${System.currentTimeMillis()}")
+        WindowsExportDialog(
+            workDir = workDirForDialog,
+            onDismiss = { showWindowsExportDialog = false },
+            onExport = { appName, iconUri ->
+                showWindowsExportDialog = false
+                showProgressDialog = true
+                coroutineScope.launch {
+                    val externalFilesDir = context.getExternalFilesDir(null)
+                        ?: throw IllegalStateException("External files directory not available.")
+                    val tempWorkDir = File(externalFilesDir, "html_packager_temp_${System.currentTimeMillis()}")
+                    try {
+                        withContext(Dispatchers.IO) {
+                            if (tempWorkDir.exists()) tempWorkDir.deleteRecursively()
+                            tempWorkDir.mkdirs()
+
+                            val sourceFolder = DocumentFile.fromTreeUri(context, webProjectUri!!)!!
+                            copyDocumentTreeTo(context, sourceFolder, tempWorkDir)
+
+                            val originalFile = File(tempWorkDir, selectedIndexFile!!.name!!)
+                            val indexFile = File(tempWorkDir, "index.html")
+                            if (originalFile.exists() && !originalFile.name.equals("index.html", ignoreCase = true)) {
+                                if (indexFile.exists()) indexFile.delete()
+                                if (!originalFile.renameTo(indexFile)) {
+                                    throw IOException("Failed to rename index file.")
+                                }
+                            }
+                        }
+
+                        exportWindowsApp(
+                            context = context,
+                            appName = appName,
+                            iconUri = iconUri,
+                            webContentDir = tempWorkDir,
+                            onProgress = { progress, status ->
+                                exportProgress = progress
+                                exportStatus = status
+                            },
+                            onComplete = { success, filePath, errorMessage ->
+                                exportResult = if (success && filePath != null) Result.success(filePath) else Result.failure(Exception(errorMessage))
+                                showProgressDialog = false
+                                showCompleteDialog = true
+                            }
+                        )
+                    } catch (e: Exception) {
+                        exportResult = Result.failure(e)
+                        showProgressDialog = false
+                        showCompleteDialog = true
+                    } finally {
+                        withContext(Dispatchers.IO) {
+                            if (tempWorkDir.exists()) {
+                                tempWorkDir.deleteRecursively()
+                            }
                         }
                     }
                 }
