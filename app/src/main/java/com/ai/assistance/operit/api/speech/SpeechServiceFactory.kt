@@ -11,6 +11,8 @@ object SpeechServiceFactory {
     enum class SpeechServiceType {
         /** 基于Sherpa-ncnn的本地识别实现 */
         SHERPA_NCNN,
+        /** 基于Sherpa-mnn的本地识别实现，集成VAD能力 */
+        SHERPA_MNN,
         // 如果未来有基于HTTP的STT，可以在此添加
         // HTTP_STT 
     }
@@ -29,6 +31,7 @@ object SpeechServiceFactory {
 
         return when (type) {
             SpeechServiceType.SHERPA_NCNN -> SherpaSpeechProvider(context)
+            SpeechServiceType.SHERPA_MNN -> SherpaMnnSpeechProvider(context)
             // case SpeechServiceType.HTTP_STT -> HttpSttProvider(context, ...)
         }
     }

@@ -79,3 +79,11 @@ if(TARGET llm)
     target_link_libraries(MNNWrapper llm)
 endif()
 
+# 添加 16KB 页面大小支持（Android 15+ 要求）
+# 这确保所有 LOAD 段对齐到 16KB 边界
+target_link_options(MNNWrapper PRIVATE "-Wl,-z,max-page-size=16384")
+target_link_options(MNN PRIVATE "-Wl,-z,max-page-size=16384")
+if(TARGET llm)
+    target_link_options(llm PRIVATE "-Wl,-z,max-page-size=16384")
+endif()
+

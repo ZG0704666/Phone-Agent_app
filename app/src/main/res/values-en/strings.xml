@@ -1834,6 +1834,7 @@
     
     <!-- STT Service Types -->
     <string name="speech_services_stt_type_sherpa">Sherpa NCNN (Local)</string>
+    <string name="speech_services_stt_type_sherpa_mnn">Sherpa MNN (Local, with VAD)</string>
     
     <!-- TTS Cleaner Regex -->
     <string name="speech_services_tts_cleaner_title">TTS Cleaner Regex List</string>
@@ -1881,7 +1882,7 @@
     <string name="speech_services_siliconflow_voice_id_hint">Enter voice name (e.g. charles) or full voice ID (e.g. custom voice starting with speech:)</string>
     
     <!-- STT Configuration -->
-    <string name="speech_services_stt_info">Currently only supports local Sherpa-NCNN engine.</string>
+    <string name="speech_services_stt_info">Supports local Sherpa-NCNN and Sherpa-MNN engines.</string>
     
     <!-- Save Actions -->
     <string name="speech_services_save_button">Save Settings</string>
@@ -1895,7 +1896,7 @@
     <string name="speech_services_info_tts_title">Text-to-Speech (TTS)</string>
     <string name="speech_services_info_tts_desc">TTS service converts text to speech. You can use the built-in system TTS engine or connect to a remote HTTP API.</string>
     <string name="speech_services_info_stt_title">Speech-to-Text (STT)</string>
-    <string name="speech_services_info_stt_desc">STT service converts speech to text. Currently only supports the built-in Sherpa NCNN engine, which runs on local device without network connection.</string>
+    <string name="speech_services_info_stt_desc">STT service converts speech to text. Supports built-in Sherpa NCNN and Sherpa MNN engines, both run on local device without network connection. Sherpa MNN integrates VAD (Voice Activity Detection) capability for improved recognition accuracy and resource efficiency.</string>
     
     <!-- UI Debugger -->
     <string name="ui_debugger_title">UI Debugger</string>

@@ -1832,6 +1832,7 @@
     
     <!-- STT Service Types -->
     <string name="speech_services_stt_type_sherpa">Sherpa NCNN (本地)</string>
+    <string name="speech_services_stt_type_sherpa_mnn">Sherpa MNN (本地, 带VAD)</string>
     
     <!-- TTS Cleaner Regex -->
     <string name="speech_services_tts_cleaner_title">TTS 清理正则列表</string>
@@ -1879,7 +1880,7 @@
     <string name="speech_services_siliconflow_voice_id_hint">预设音色（alex/benjamin/charles等）或自定义音色（speech:开头的URI）</string>
     
     <!-- STT Configuration -->
-    <string name="speech_services_stt_info">目前仅支持本地 Sherpa-NCNN 引擎。</string>
+    <string name="speech_services_stt_info">支持本地 Sherpa-NCNN 和 Sherpa-MNN 引擎。</string>
     
     <!-- Save Actions -->
     <string name="speech_services_save_button">保存设置</string>
@@ -1893,7 +1894,7 @@
     <string name="speech_services_info_tts_title">文本转语音 (TTS)</string>
     <string name="speech_services_info_tts_desc">TTS 服务将文本转换为语音。您可以使用内置的系统 TTS 引擎或连接到远程 HTTP API。</string>
     <string name="speech_services_info_stt_title">语音转文本 (STT)</string>
-    <string name="speech_services_info_stt_desc">STT 服务将语音转换为文本。目前仅支持内置的 Sherpa NCNN 引擎，该引擎在本地设备上运行，不需要网络连接。</string>
+    <string name="speech_services_info_stt_desc">STT 服务将语音转换为文本。支持内置的 Sherpa NCNN 和 Sherpa MNN 引擎，均可在本地设备上运行，不需要网络连接。Sherpa MNN 集成了 VAD（语音活动检测）功能，可提升识别准确性和资源利用效率。</string>
     
     <!-- UI Debugger -->
     <string name="ui_debugger_title">UI调试器</string>
