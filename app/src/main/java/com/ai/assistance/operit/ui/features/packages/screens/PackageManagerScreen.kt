@@ -94,6 +94,20 @@ fun PackageManagerScreen(
     var showEnvDialog by remember { mutableStateOf(false) }
     var envVariables by remember { mutableStateOf<Map<String, String>>(emptyMap()) }
 
+    val requiredEnvKeys by remember {
+        derivedStateOf {
+            val packagesMap = availablePackages.value
+
+            packagesMap.values
+                .flatMap { it.env }
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .toSet()
+                .toList()
+                .sorted()
+        }
+    }
+
     // File picker launcher for importing external packages
     val packageFilePicker =
             rememberLauncherForActivityResult(contract = ActivityResultContracts.GetContent()) { uri
@@ -218,7 +232,10 @@ fun PackageManagerScreen(
                         // Environment variables management button
                         SmallFloatingActionButton(
                                 onClick = {
-                                    envVariables = envPreferences.getAllEnv()
+                                    envVariables =
+                                            requiredEnvKeys.associateWith { key ->
+                                                envPreferences.getEnv(key) ?: ""
+                                            }
                                     showEnvDialog = true
                                 },
                                 containerColor = MaterialTheme.colorScheme.secondaryContainer,
@@ -557,8 +574,9 @@ fun PackageManagerScreen(
 
             // Environment Variables Dialog for packages
             if (showEnvDialog) {
-                MCPEnvironmentVariablesDialog(
-                        environmentVariables = envVariables,
+                PackageEnvironmentVariablesDialog(
+                        requiredEnvKeys = requiredEnvKeys,
+                        currentValues = envVariables,
                         onDismiss = { showEnvDialog = false },
                         onConfirm = { updated ->
                             envPreferences.setAllEnv(updated)
@@ -569,6 +587,84 @@ fun PackageManagerScreen(
             }
         }
     }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun PackageEnvironmentVariablesDialog(
+    requiredEnvKeys: List<String>,
+    currentValues: Map<String, String>,
+    onDismiss: () -> Unit,
+    onConfirm: (Map<String, String>) -> Unit
+) {
+    val editableValuesState =
+        remember(requiredEnvKeys, currentValues) {
+            mutableStateOf(
+                requiredEnvKeys.associateWith { key -> currentValues[key] ?: "" }
+            )
+        }
+    val editableValues by editableValuesState
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(text = "配置环境变量") },
+        text = {
+            if (requiredEnvKeys.isEmpty()) {
+                Text(text = "当前已导入的工具包没有声明需要的环境变量。")
+            } else {
+                Column(modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        text = "以下环境变量由当前已导入的工具包声明，请为每一项填写值：",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 320.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(requiredEnvKeys) { key ->
+                            Column(modifier = Modifier.fillMaxWidth()) {
+                                Text(
+                                    text = key,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                OutlinedTextField(
+                                    value = editableValues[key] ?: "",
+                                    onValueChange = { newValue ->
+                                        editableValuesState.value =
+                                            editableValuesState.value.toMutableMap().apply {
+                                                this[key] = newValue
+                                            }
+                                    },
+                                    singleLine = true,
+                                    modifier = Modifier.fillMaxWidth()
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    onConfirm(editableValues)
+                }
+            ) {
+                Text(text = "保存")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text(text = "取消")
+            }
+        }
+    )
 }
 
 @Composable

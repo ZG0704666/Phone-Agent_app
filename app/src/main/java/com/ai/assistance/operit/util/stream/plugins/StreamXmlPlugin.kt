@@ -26,7 +26,7 @@ class StreamXmlPlugin(private val includeTagsInOutput: Boolean = true) : StreamP
     private var allowStartAfterPunctuation: Boolean = false
 
     private val punctuationTriggers =
-            setOf('，', '。', '？', '！', ',', '.', '?', '!')
+            setOf('，', '。', '？', '！', '：', ':', ',', '.', '?', '!')
 
     init {
         startTagMatcher =
