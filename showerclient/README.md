@@ -49,14 +49,12 @@ class YourApplication : Application() {
 
 ---
 
-## 3. 打包 Shower Server JAR
+## 3. Shower Server JAR（已内置）
 
-默认实现会从应用 `assets` 中读取 `shower-server.jar`：
+本库已经在自身模块内置了 `shower-server.jar`：
 
-- 将文件放在：`app/src/main/assets/shower-server.jar`
-- 运行时库会把它复制到 `/sdcard/Download/Operit/shower-server.jar`，再拷贝到 `/data/local/tmp/shower-server.jar`
-
-如果你有自己的部署方式，也可以只用本库的控制 API，而自行处理 server 进程的启动。
+- 宿主 App **不需要** 再手动打包或拷贝任何 JAR 文件；
+- 运行时库会自动从自身 `assets` 中读取，并复制到 `/sdcard/Download/Operit/shower-server.jar`，再拷贝到 `/data/local/tmp/shower-server.jar`。
 
 ---
 
@@ -152,6 +150,6 @@ ShowerController.setBinaryHandler { frame: ByteArray ->
 
 ## 7. 最小心智模型
 
-- 你提供：`ShellRunner`、server JAR、广播接收器；
+- 你提供：`ShellRunner`、广播接收器；
 - 本库提供：`ShowerServerManager` + `ShowerController` + 可选的 `ShowerVideoRenderer` / `ui.ShowerSurfaceView`；
 - 常见调用顺序：**注入 ShellRunner → 启动 server → 收 Binder → ensureDisplay → 发送输入 / 渲染视频**。
