@@ -3,6 +3,7 @@ package com.ai.assistance.operit.core.tools.system
 import android.content.Context
 import com.ai.assistance.operit.util.AppLogger
 import com.ai.assistance.operit.core.tools.system.shell.ShellExecutorFactory
+import com.ai.assistance.operit.core.tools.system.shell.ShellProcess
 import com.ai.assistance.operit.data.preferences.androidPermissionPreferences
 
 /** 向后兼容的Shell命令执行工具类 通过权限级别委托到相应的Shell执行器 */
@@ -66,6 +67,37 @@ class AndroidShellExecutor {
 
             val result = executor.executeCommand(command, identity)
             return CommandResult(result.success, result.stdout, result.stderr, result.exitCode)
+        }
+
+        suspend fun startShellProcess(command: String): ShellProcess {
+            val ctx = context ?: throw IllegalStateException("Context not initialized")
+
+            val preferredLevel = androidPermissionPreferences.getPreferredPermissionLevel()
+            AppLogger.d(TAG, "Starting process with preferred permission level: $preferredLevel")
+
+            val actualLevel = preferredLevel ?: AndroidPermissionLevel.STANDARD
+            val preferredExecutor = ShellExecutorFactory.getExecutor(ctx, actualLevel)
+            val permStatus = preferredExecutor.hasPermission()
+
+            if (preferredExecutor.isAvailable() && permStatus.granted) {
+                return preferredExecutor.startProcess(command)
+            }
+
+            AppLogger.d(
+                TAG,
+                "Preferred executor not available (${permStatus.reason}), trying highest available executor"
+            )
+
+            val (executor, executorStatus) = ShellExecutorFactory.getHighestAvailableExecutor(ctx)
+
+            if (!executorStatus.granted) {
+                throw SecurityException(
+                    "No suitable shell executor available: ${executorStatus.reason}"
+                )
+            }
+
+            AppLogger.d(TAG, "Starting process with permission level: ${executor.getPermissionLevel()}")
+            return executor.startProcess(command)
         }
     }
 

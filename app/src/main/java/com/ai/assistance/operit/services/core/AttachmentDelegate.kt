@@ -15,6 +15,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.withContext
 import android.provider.DocumentsContract
+import android.webkit.MimeTypeMap
 import java.io.File
 
 /**
@@ -641,17 +642,34 @@ $foldersText
 
     /** Get MIME type from file path */
     private fun getMimeTypeFromPath(filePath: String): String? {
-        val extension = filePath.substringAfterLast('.', "")
-        return when (extension.lowercase()) {
+        val extension = filePath.substringAfterLast('.', "").lowercase()
+        if (extension.isBlank()) return null
+        return when (extension) {
             "jpg", "jpeg" -> "image/jpeg"
             "png" -> "image/png"
             "gif" -> "image/gif"
+            "webp" -> "image/webp"
+            "heic" -> "image/heic"
             "txt" -> "text/plain"
+            "json" -> "application/json"
+            "xml" -> "application/xml"
             "pdf" -> "application/pdf"
             "doc", "docx" -> "application/msword"
             "xls", "xlsx" -> "application/vnd.ms-excel"
             "zip" -> "application/zip"
-            else -> null
+            "mp3" -> "audio/mpeg"
+            "wav" -> "audio/wav"
+            "m4a" -> "audio/mp4"
+            "aac" -> "audio/aac"
+            "ogg" -> "audio/ogg"
+            "flac" -> "audio/flac"
+            "mp4" -> "video/mp4"
+            "mkv" -> "video/x-matroska"
+            "webm" -> "video/webm"
+            "3gp" -> "video/3gpp"
+            "avi" -> "video/x-msvideo"
+            "mov" -> "video/quicktime"
+            else -> MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension)
         }
     }
 }

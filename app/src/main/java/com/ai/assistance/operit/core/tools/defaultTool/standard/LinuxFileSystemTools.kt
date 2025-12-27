@@ -11,6 +11,7 @@ import com.ai.assistance.operit.core.tools.FileOperationData
 import com.ai.assistance.operit.core.tools.FilePartContentData
 import com.ai.assistance.operit.core.tools.FindFilesResultData
 import com.ai.assistance.operit.core.tools.StringResultData
+import com.ai.assistance.operit.core.tools.ToolProgressBus
 import com.ai.assistance.operit.data.model.AITool
 import com.ai.assistance.operit.data.model.ToolResult
 import com.ai.assistance.operit.util.FileUtils
@@ -976,6 +977,7 @@ class LinuxFileSystemTools(context: Context) : StandardFileSystemTools(context) 
         }
 
         return try {
+            ToolProgressBus.update(tool.name, -1f, "Searching...")
             if (!fs.exists(basePath)) {
                 return ToolResult(
                     toolName = tool.name,
@@ -992,6 +994,8 @@ class LinuxFileSystemTools(context: Context) : StandardFileSystemTools(context) 
                 caseInsensitive = false
             )
 
+            ToolProgressBus.update(tool.name, 1f, "Search completed, found ${files.size}")
+
             return ToolResult(
                 toolName = tool.name,
                 success = true,
@@ -1000,6 +1004,7 @@ class LinuxFileSystemTools(context: Context) : StandardFileSystemTools(context) 
             )
         } catch (e: Exception) {
             AppLogger.e(TAG, "Error finding files", e)
+            ToolProgressBus.update(tool.name, 1f, "Search failed")
             return ToolResult(
                 toolName = tool.name,
                 success = false,

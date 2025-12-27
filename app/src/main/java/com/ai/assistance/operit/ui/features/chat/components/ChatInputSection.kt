@@ -50,6 +50,7 @@ import androidx.compose.ui.tooling.preview.Preview
 import com.ai.assistance.operit.data.model.AttachmentInfo
 import com.ai.assistance.operit.data.model.InputProcessingState
 import com.ai.assistance.operit.data.model.ChatMessage
+import com.ai.assistance.operit.core.tools.ToolProgressBus
 import com.ai.assistance.operit.ui.common.animations.SimpleAnimatedVisibility
 import com.ai.assistance.operit.ui.features.chat.viewmodel.ChatViewModel
 import com.ai.assistance.operit.ui.floating.FloatingMode
@@ -115,6 +116,8 @@ fun ChatInputSection(
     val scope = rememberCoroutineScope()
     val colorScheme = MaterialTheme.colorScheme
     val typography = MaterialTheme.typography
+
+    val toolProgressEvent by ToolProgressBus.progress.collectAsState()
 
     val isProcessing = isLoading
 
@@ -234,9 +237,10 @@ fun ChatInputSection(
 
             // Input processing indicator
             SimpleAnimatedVisibility(visible = showInputProcessingStatus && inputState !is InputProcessingState.Idle && inputState !is InputProcessingState.Completed) {
-                val (progressColor, message) = when (inputState) {
+                val (progressColor, baseMessage) = when (inputState) {
                     is InputProcessingState.Connecting -> MaterialTheme.colorScheme.tertiary to inputState.message
                     is InputProcessingState.ExecutingTool -> MaterialTheme.colorScheme.secondary to context.getString(R.string.executing_tool, inputState.toolName)
+                    is InputProcessingState.ToolProgress -> MaterialTheme.colorScheme.secondary to inputState.message
                     is InputProcessingState.Processing -> MaterialTheme.colorScheme.primary to inputState.message
                     is InputProcessingState.ProcessingToolResult -> MaterialTheme.colorScheme.tertiary.copy(
                         alpha = 0.8f
@@ -246,11 +250,23 @@ fun ChatInputSection(
                     else -> MaterialTheme.colorScheme.primary to ""
                 }
 
-                val progressValue = when (inputState) {
+                var message = baseMessage
+                var progressValue = when (inputState) {
                     is InputProcessingState.Processing -> 0.3f
                     is InputProcessingState.Connecting -> 0.6f
                     is InputProcessingState.Summarizing -> 0.9f
+                    is InputProcessingState.ToolProgress -> inputState.progress
                     else -> 1f
+                }
+
+                if (inputState is InputProcessingState.ExecutingTool) {
+                    val event = toolProgressEvent
+                    if (event != null && inputState.toolName.contains(event.toolName)) {
+                        progressValue = event.progress
+                        if (event.message.isNotBlank()) {
+                            message = event.message
+                        }
+                    }
                 }
 
                 SimpleLinearProgressIndicator(

@@ -34,6 +34,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import com.ai.assistance.operit.core.tools.ToolProgressBus
 
 /** 委托类，负责处理消息处理相关功能 */
 class MessageProcessingDelegate(
@@ -552,6 +553,9 @@ class MessageProcessingDelegate(
      */
     fun handleInputProcessingState(state: EnhancedInputProcessingState) {
         coroutineScope.launch(Dispatchers.Main) {
+            if (state !is EnhancedInputProcessingState.ExecutingTool) {
+                ToolProgressBus.clear()
+            }
             _inputProcessingState.value = state
             _isLoading.value = state !is EnhancedInputProcessingState.Idle && state !is EnhancedInputProcessingState.Completed
             // 当服务状态进入空闲或完成，清理活跃会话标记

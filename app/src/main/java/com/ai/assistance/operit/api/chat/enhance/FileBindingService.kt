@@ -54,7 +54,8 @@ class FileBindingService(context: Context) {
      */
     suspend fun processFileBinding(
             originalContent: String,
-            aiGeneratedCode: String
+            aiGeneratedCode: String,
+            onProgress: ((Float, String) -> Unit)? = null
     ): Pair<String, String> {
         if (originalContent.isNotEmpty() && !aiGeneratedCode.contains("[START-")) {
             val errorMsg =
@@ -65,10 +66,12 @@ class FileBindingService(context: Context) {
         }
 
         if (aiGeneratedCode.contains("[START-")) {
+            onProgress?.invoke(0f, "Parsing patch...")
             AppLogger.d(TAG, "Structured edit blocks detected. Attempting fuzzy patch.")
             try {
-                val (success, resultString) = applyFuzzyPatch(originalContent, aiGeneratedCode)
+                val (success, resultString) = applyFuzzyPatch(originalContent, aiGeneratedCode, onProgress)
                 if (success) {
+                    onProgress?.invoke(1f, "Patch applied")
                     AppLogger.d(TAG, "Fuzzy patch succeeded.")
                     val diffString = generateDiff(originalContent.replace("\r\n", "\n"), resultString)
                     return Pair(resultString, diffString)
@@ -182,7 +185,8 @@ class FileBindingService(context: Context) {
      */
     private fun applyFuzzyPatch(
         originalContent: String,
-        aiPatchCode: String
+        aiPatchCode: String,
+        onProgress: ((Float, String) -> Unit)? = null
     ): Pair<Boolean, String> {
         try {
             val operations = parseEditOperations(aiPatchCode)
@@ -190,11 +194,21 @@ class FileBindingService(context: Context) {
                 return Pair(false, "No valid edit operations found in the patch code.")
             }
 
+            onProgress?.invoke(0f, "Searching match...")
+
             val originalLines = originalContent.lines().toMutableList()
             val enrichedOps = mutableListOf<Triple<EditOperation, Int, Int>>()
 
-            for (op in operations) {
-                val (start, end) = findBestMatchRange(originalLines, op.oldContent)
+            val totalOps = operations.size.coerceAtLeast(1)
+            val matchPhaseWeight = 0.8f
+            val applyPhaseWeight = 0.2f
+
+            for ((index, op) in operations.withIndex()) {
+                val (start, end) = findBestMatchRange(originalLines, op.oldContent) { p, msg ->
+                    val overall = (matchPhaseWeight * ((index.toFloat() + p) / totalOps.toFloat()))
+                        .coerceIn(0f, 0.99f)
+                    onProgress?.invoke(overall, "Matching ${index + 1}/$totalOps: $msg")
+                }
                 if (start == -1) {
                     AppLogger.w(TAG, "Could not find a suitable match for OLD block: ${op.oldContent.take(100)}...")
                     return Pair(false, "Could not find a match for an OLD block. The file may have changed too much.")
@@ -209,6 +223,7 @@ class FileBindingService(context: Context) {
             // Sort operations by start line in descending order to apply from the bottom up
             enrichedOps.sortByDescending { it.second }
 
+            var applied = 0
             for ((op, start, end) in enrichedOps) {
                 AppLogger.d(TAG, "Applying ${op.action} at lines ${start + 1}-${end + 1}")
 
@@ -222,6 +237,7 @@ class FileBindingService(context: Context) {
 
                 // If it's a REPLACE, add the new lines
                 if (op.action == EditAction.REPLACE) {
+
                     val newLinesRaw = op.newContent.lines()
 
                     // For simple single-line replacements, inherit the indentation of the original line
@@ -247,6 +263,11 @@ class FileBindingService(context: Context) {
 
                     originalLines.addAll(start, newLines)
                 }
+
+                applied++
+                val overall = (matchPhaseWeight + (applyPhaseWeight * (applied.toFloat() / totalOps.toFloat())))
+                    .coerceIn(0f, 0.99f)
+                onProgress?.invoke(overall, "Applying ${applied}/$totalOps")
             }
 
             return Pair(true, originalLines.joinToString("\n"))
@@ -316,7 +337,11 @@ class FileBindingService(context: Context) {
         return operations
     }
 
-    private fun findBestMatchRange(originalLines: List<String>, oldContent: String): Pair<Int, Int> {
+    private fun findBestMatchRange(
+        originalLines: List<String>,
+        oldContent: String,
+        onProgress: ((Float, String) -> Unit)? = null
+    ): Pair<Int, Int> {
         val oldContentLines = oldContent.lines()
         val numOldLines = oldContentLines.size
         if (numOldLines == 0) return -1 to -1
@@ -357,8 +382,22 @@ class FileBindingService(context: Context) {
         var bestMatchRange = -1 to -1
 
         // --- 阶段二：并行滑动窗口搜索 ---
-        val totalIterations = originalLines.size * targetSizes.count()
+        val totalIterations = originalLines.size.toLong() * targetSizes.count().toLong()
         AppLogger.d(TAG, "开始滑动窗口匹配（并行），总迭代次数: $totalIterations")
+
+        val processedWindows = java.util.concurrent.atomic.AtomicLong(0L)
+        val lastProgressEmitMs = java.util.concurrent.atomic.AtomicLong(0L)
+
+        fun maybeEmitProgress(processed: Long) {
+            if (onProgress == null) return
+            val total = totalIterations.coerceAtLeast(1L)
+            val p = (processed.toDouble() / total.toDouble()).coerceIn(0.0, 0.99)
+            val now = System.currentTimeMillis()
+            val last = lastProgressEmitMs.get()
+            if (now - last < 200L) return
+            if (!lastProgressEmitMs.compareAndSet(last, now)) return
+            onProgress.invoke(p.toFloat(), "Searching... ${(p * 100).toInt()}%")
+        }
 
         val availableCores = Runtime.getRuntime().availableProcessors().coerceAtLeast(2)
         val threadCount = minOf(availableCores, originalLines.size)
@@ -380,6 +419,7 @@ class FileBindingService(context: Context) {
                     var localBestEnd = -1
                     var localWindows = 0
                     var localLcs = 0
+                    var localChunk = 0L
 
                     for (i in startLine until endExclusive) {
                         if (foundPerfectMatch.get()) {
@@ -397,6 +437,12 @@ class FileBindingService(context: Context) {
                             }
 
                             localWindows++
+                            localChunk++
+                            if (localChunk >= 2048L) {
+                                val processed = processedWindows.addAndGet(localChunk)
+                                localChunk = 0L
+                                maybeEmitProgress(processed)
+                            }
 
                             val startCharIndex = lineStartIndices[i]
                             val endCharIndex = lineStartIndices[endLine]
@@ -431,6 +477,11 @@ class FileBindingService(context: Context) {
                         }
                     }
 
+                    if (localChunk > 0L) {
+                        val processed = processedWindows.addAndGet(localChunk)
+                        maybeEmitProgress(processed)
+                    }
+
                     MatchSearchResult(localBestScore, localBestStart, localBestEnd, localWindows, localLcs)
                 }
 
@@ -451,10 +502,6 @@ class FileBindingService(context: Context) {
                     AppLogger.e(TAG, "Error getting file binding search result", e)
                 }
             }
-
-            if (bestMatchScore == 1.0) {
-                AppLogger.d(TAG, "并行模式下已找到100%匹配。")
-            }
         } finally {
             executor.shutdown()
         }
@@ -462,6 +509,7 @@ class FileBindingService(context: Context) {
         // 记录最终结果
         val totalTime = (System.currentTimeMillis() - startTime) / 1000.0
         val result = if (bestMatchScore > 0.9) {
+
             val (start, end) = bestMatchRange
             AppLogger.d(
                 TAG,
@@ -474,6 +522,8 @@ class FileBindingService(context: Context) {
             AppLogger.w(TAG, "未找到足够好的匹配 (最高相似度: ${(bestMatchScore * 100).toInt()}% < 90%)")
             -1 to -1
         }
+
+        onProgress?.invoke(1f, "Search done")
 
         return result
     }

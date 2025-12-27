@@ -12,24 +12,30 @@ import com.ai.assistance.operit.core.tools.FilePartContentData
 import com.ai.assistance.operit.core.tools.FindFilesResultData
 import com.ai.assistance.operit.core.tools.StringResultData
 import com.ai.assistance.operit.core.tools.defaultTool.accessbility.AccessibilityFileSystemTools
-import com.ai.assistance.operit.core.tools.defaultTool.standard.StandardFileSystemTools
 import com.ai.assistance.operit.core.tools.system.AndroidShellExecutor
 import com.ai.assistance.operit.data.model.AITool
 import com.ai.assistance.operit.data.model.ToolParameter
 import com.ai.assistance.operit.data.model.ToolResult
-import com.ai.assistance.operit.data.preferences.ApiPreferences
 import com.ai.assistance.operit.core.tools.defaultTool.PathValidator
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
-import okhttp3.OkHttpClient
-import okhttp3.Request
+import kotlin.math.exp
 import com.ai.assistance.operit.util.FileUtils
+import com.ai.assistance.operit.core.tools.ToolProgressBus
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.flow.collect
 
 /** 调试者级别的文件系统工具，继承无障碍版本 */
 open class DebuggerFileSystemTools(context: Context) : AccessibilityFileSystemTools(context) {
@@ -52,6 +58,23 @@ open class DebuggerFileSystemTools(context: Context) : AccessibilityFileSystemTo
         val normalizedPath = path.trim()
         return normalizedPath.startsWith("/data/data/$OPERIT_PACKAGE") ||
                normalizedPath.startsWith("/data/user/0/$OPERIT_PACKAGE")
+    }
+
+    private fun shQuote(value: String): String {
+        return "'" + value.replace("'", "'\"'\"'") + "'"
+    }
+
+    private fun smoothProgress(count: Int, scale: Float): Float {
+        if (count <= 0) return 0f
+        return (1f - exp(-count / scale)).coerceIn(0f, 0.99f)
+    }
+
+    private fun updateProgressFloor(progressFloor: AtomicInteger, candidate: Int) {
+        while (true) {
+            val old = progressFloor.get()
+            if (candidate <= old) return
+            if (progressFloor.compareAndSet(old, candidate)) return
+        }
     }
 
     /** List files in a directory */
@@ -1518,6 +1541,7 @@ open class DebuggerFileSystemTools(context: Context) : AccessibilityFileSystemTo
         }
 
         return try {
+            ToolProgressBus.update(tool.name, 0.02f, "Searching (device)...")
             // Add options for different search modes
             val usePathPattern =
                     tool.parameters.find { it.name == "use_path_pattern" }?.value?.toBoolean()
@@ -1548,18 +1572,77 @@ open class DebuggerFileSystemTools(context: Context) : AccessibilityFileSystemTo
             val command =
                     "find '${if(path.endsWith("/")) path else "$path/"}' $depthOption $searchOption $patternForCommand"
 
-            val result = AndroidShellExecutor.executeShellCommand(command)
+            val files = mutableListOf<String>()
+            val foundCount = AtomicInteger(0)
+            val progressFloor = AtomicInteger(2)
+            val stderrBuilder = StringBuilder()
 
-            // Always consider the command successful, and check the output
-            val fileList = result.stdout.trim()
-
-            // 将结果转换为字符串列表
-            val files =
-                    if (fileList.isBlank()) {
-                        emptyList()
-                    } else {
-                        fileList.split("\n").map { it.trim() }.filter { it.isNotEmpty() }
+            val process = AndroidShellExecutor.startShellProcess(command)
+            try {
+                val exitCode = coroutineScope {
+                    val stdoutJob = launch {
+                        process.stdout.collect { line ->
+                            val v = line.trim()
+                            if (v.isNotEmpty()) {
+                                files.add(v)
+                                val found = foundCount.incrementAndGet()
+                                val p = (smoothProgress(found, 250f) * 100).toInt().coerceIn(0, 99)
+                                updateProgressFloor(progressFloor, p)
+                                if (found % 20 == 0) {
+                                    ToolProgressBus.update(
+                                        tool.name,
+                                        progressFloor.get() / 100f,
+                                        "Searching... found $found"
+                                    )
+                                }
+                            }
+                        }
                     }
+                    val stderrJob = launch {
+                        process.stderr.collect { line ->
+                            if (line.isNotBlank()) {
+                                stderrBuilder.appendLine(line)
+                            }
+                        }
+                    }
+                    val tickerJob = launch {
+                        while (isActive && process.isAlive) {
+                            delay(500)
+                            val current = progressFloor.get()
+                            if (current < 95) {
+                                progressFloor.compareAndSet(current, current + 1)
+                                ToolProgressBus.update(
+                                    tool.name,
+                                    progressFloor.get() / 100f,
+                                    "Searching... found ${foundCount.get()}"
+                                )
+                            }
+                        }
+                    }
+
+                    val code = process.waitFor()
+                    stdoutJob.cancelAndJoin()
+                    stderrJob.cancelAndJoin()
+                    tickerJob.cancelAndJoin()
+                    code
+                }
+
+                if (exitCode != 0) {
+                    val err = stderrBuilder.toString().trim()
+                    return ToolResult(
+                        toolName = tool.name,
+                        success = false,
+                        result = FindFilesResultData(path = path, pattern = pattern, files = emptyList()),
+                        error = if (err.isNotBlank()) err else "find command failed with exitCode=$exitCode"
+                    )
+                }
+            } finally {
+                if (process.isAlive) {
+                    process.destroy()
+                }
+            }
+
+            ToolProgressBus.update(tool.name, 1f, "Search completed, found ${files.size}")
 
             return ToolResult(
                     toolName = tool.name,
@@ -1569,6 +1652,7 @@ open class DebuggerFileSystemTools(context: Context) : AccessibilityFileSystemTo
             )
         } catch (e: Exception) {
             AppLogger.e(TAG, "Error searching for files", e)
+            ToolProgressBus.update(tool.name, 1f, "Search failed")
             return ToolResult(
                     toolName = tool.name,
                     success = false,
@@ -1987,10 +2071,11 @@ open class DebuggerFileSystemTools(context: Context) : AccessibilityFileSystemTo
         }
 
         return try {
+            ToolProgressBus.update(tool.name, -1f, "Unzipping...")
             // Check if the zip file exists
             val existsResult =
                     AndroidShellExecutor.executeShellCommand(
-                            "test -f '$zipPath' && echo 'exists' || echo 'not exists'"
+                            "test -f ${shQuote(zipPath)} && echo 'exists' || echo 'not exists'"
                     )
             if (existsResult.stdout.trim() != "exists") {
                 return ToolResult(
@@ -2002,7 +2087,123 @@ open class DebuggerFileSystemTools(context: Context) : AccessibilityFileSystemTo
             }
 
             // Create destination directory if it doesn't exist
-            AndroidShellExecutor.executeShellCommand("mkdir -p '$destPath'")
+            AndroidShellExecutor.executeShellCommand("mkdir -p ${shQuote(destPath)};")
+
+            val deviceUnzipCommands =
+                listOf(
+                    "unzip -o ${shQuote(zipPath)} -d ${shQuote(destPath)}",
+                    "toybox unzip -o ${shQuote(zipPath)} -d ${shQuote(destPath)}",
+                    "busybox unzip -o ${shQuote(zipPath)} -d ${shQuote(destPath)}"
+                )
+
+            for (cmd in deviceUnzipCommands) {
+                try {
+                    ToolProgressBus.update(tool.name, 0.02f, "Unzipping (device)...")
+                    val extractedCount = AtomicInteger(0)
+                    val progressFloor = AtomicInteger(2)
+                    val stderrBuilder = StringBuilder()
+
+                    val process = AndroidShellExecutor.startShellProcess("$cmd;")
+                    try {
+                        val exitCode = coroutineScope {
+                            val stdoutJob = launch {
+                                process.stdout.collect { line ->
+                                    val t = line.trimStart()
+                                    val isProgressLine =
+                                        t.startsWith("inflating:") ||
+                                        t.startsWith("extracting:") ||
+                                        t.startsWith("creating:") ||
+                                        t.startsWith("  inflating:") ||
+                                        t.startsWith("  extracting:")
+
+                                    if (isProgressLine) {
+                                        val extracted = extractedCount.incrementAndGet()
+                                        val p = (smoothProgress(extracted, 120f) * 100).toInt().coerceIn(0, 99)
+                                        updateProgressFloor(progressFloor, p)
+                                        if (extracted % 10 == 0) {
+                                            ToolProgressBus.update(
+                                                tool.name,
+                                                progressFloor.get() / 100f,
+                                                "Unzipping... extracted $extracted"
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            val stderrJob = launch {
+                                process.stderr.collect { line ->
+                                    if (line.isNotBlank()) {
+                                        stderrBuilder.appendLine(line)
+                                    }
+
+                                    val t = line.trimStart()
+                                    val isProgressLine =
+                                        t.startsWith("inflating:") ||
+                                        t.startsWith("extracting:") ||
+                                        t.startsWith("creating:") ||
+                                        t.startsWith("  inflating:") ||
+                                        t.startsWith("  extracting:")
+
+                                    if (isProgressLine) {
+                                        val extracted = extractedCount.incrementAndGet()
+                                        val p = (smoothProgress(extracted, 120f) * 100).toInt().coerceIn(0, 99)
+                                        updateProgressFloor(progressFloor, p)
+                                        if (extracted % 10 == 0) {
+                                            ToolProgressBus.update(
+                                                tool.name,
+                                                progressFloor.get() / 100f,
+                                                "Unzipping... extracted $extracted"
+                                            )
+                                        }
+                                    }
+                                }
+                            }
+                            val tickerJob = launch {
+                                while (isActive && process.isAlive) {
+                                    delay(500)
+                                    val current = progressFloor.get()
+                                    if (current < 95) {
+                                        progressFloor.compareAndSet(current, current + 1)
+                                        ToolProgressBus.update(
+                                            tool.name,
+                                            progressFloor.get() / 100f,
+                                            "Unzipping..."
+                                        )
+                                    }
+                                }
+                            }
+
+                            val code = process.waitFor()
+                            stdoutJob.cancelAndJoin()
+                            stderrJob.cancelAndJoin()
+                            tickerJob.cancelAndJoin()
+                            code
+                        }
+
+                        if (exitCode == 0) {
+                            ToolProgressBus.update(tool.name, 1f, "Unzip completed")
+                            return ToolResult(
+                                toolName = tool.name,
+                                success = true,
+                                result =
+                                    FileOperationData(
+                                        operation = "unzip",
+                                        path = zipPath,
+                                        successful = true,
+                                        details = "Successfully extracted $zipPath to $destPath"
+                                    ),
+                                error = ""
+                            )
+                        }
+                    } finally {
+                        if (process.isAlive) {
+                            process.destroy()
+                        }
+                    }
+                } catch (e: Exception) {
+                    AppLogger.w(TAG, "Device-side unzip failed for cmd: $cmd", e)
+                }
+            }
 
             // Create temporary files for processing - using external files directory
             // for better
@@ -2017,7 +2218,7 @@ open class DebuggerFileSystemTools(context: Context) : AccessibilityFileSystemTo
                 // Copy the zip file from device to temp file
                 val pullResult =
                         AndroidShellExecutor.executeShellCommand(
-                                "cat '$zipPath' > '${tempZipFile.absolutePath}'"
+                                "cat ${shQuote(zipPath)} > ${shQuote(tempZipFile.absolutePath)}"
                         )
                 if (!pullResult.success) {
                     return ToolResult(
@@ -2034,8 +2235,15 @@ open class DebuggerFileSystemTools(context: Context) : AccessibilityFileSystemTo
                         "Temp ZIP file loaded at: ${tempZipFile.absolutePath}, size: ${tempZipFile.length()} bytes"
                 )
 
+                val totalEntries = try {
+                    ZipFile(tempZipFile).use { it.size() }
+                } catch (_: Exception) {
+                    null
+                }
+                var processedEntries = 0
+
                 // Extract files using ZipInputStream
-                val buffer = ByteArray(1024)
+                val buffer = ByteArray(64 * 1024)
                 val zipInputStream =
                         ZipInputStream(BufferedInputStream(FileInputStream(tempZipFile)))
 
@@ -2043,12 +2251,27 @@ open class DebuggerFileSystemTools(context: Context) : AccessibilityFileSystemTo
                     var zipEntry: ZipEntry? = zipInputStream.nextEntry
                     while (zipEntry != null) {
                         val fileName = zipEntry.name
-                        val newFile = File(tempDir, "unzip_temp_${System.currentTimeMillis()}")
+                        if (fileName.startsWith("/") || fileName.contains("..") || fileName.contains("\\")) {
+                            zipInputStream.closeEntry()
+                            zipEntry = zipInputStream.nextEntry
+                            continue
+                        }
+
+                        val newFile = File(tempDir, fileName)
+
+                        val newFileCanonical = newFile.canonicalPath
+                        val tempDirCanonical = tempDir.canonicalPath + File.separator
+                        if (!newFileCanonical.startsWith(tempDirCanonical)) {
+                            zipInputStream.closeEntry()
+                            zipEntry = zipInputStream.nextEntry
+                            continue
+                        }
 
                         // Skip directories, but make sure they exist
                         if (zipEntry.isDirectory) {
+                            newFile.mkdirs()
                             val dirPath = "$destPath/$fileName"
-                            AndroidShellExecutor.executeShellCommand("mkdir -p '$dirPath'")
+                            AndroidShellExecutor.executeShellCommand("mkdir -p ${shQuote(dirPath)};")
                             zipInputStream.closeEntry()
                             zipEntry = zipInputStream.nextEntry
                             continue
@@ -2058,8 +2281,10 @@ open class DebuggerFileSystemTools(context: Context) : AccessibilityFileSystemTo
                         val filePath = "$destPath/$fileName"
                         val parentDirPath = File(filePath).parent
                         if (parentDirPath != null) {
-                            AndroidShellExecutor.executeShellCommand("mkdir -p '$parentDirPath'")
+                            AndroidShellExecutor.executeShellCommand("mkdir -p ${shQuote(parentDirPath)};")
                         }
+
+                        newFile.parentFile?.mkdirs()
 
                         // Extract file
                         val fileOutputStream = FileOutputStream(newFile)
@@ -2076,7 +2301,7 @@ open class DebuggerFileSystemTools(context: Context) : AccessibilityFileSystemTo
                         // Copy the extracted file to device
                         val pushResult =
                                 AndroidShellExecutor.executeShellCommand(
-                                        "cat '${newFile.absolutePath}' > '$filePath'"
+                                        "cat ${shQuote(newFile.absolutePath)} > ${shQuote(filePath)}"
                                 )
                         if (!pushResult.success) {
                             AppLogger.w(TAG, "Failed to copy extracted file: $fileName to $filePath")
@@ -2087,12 +2312,27 @@ open class DebuggerFileSystemTools(context: Context) : AccessibilityFileSystemTo
                         newFile.delete()
 
                         zipInputStream.closeEntry()
+                        processedEntries++
+                        val progress =
+                            if (totalEntries != null && totalEntries > 0) {
+                                (processedEntries.toFloat() / totalEntries.toFloat()).coerceIn(0f, 1f)
+                            } else {
+                                -1f
+                            }
+                        val msg =
+                            if (totalEntries != null && totalEntries > 0) {
+                                "Unzipping... ($processedEntries/$totalEntries)"
+                            } else {
+                                "Unzipping..."
+                            }
+                        ToolProgressBus.update(tool.name, progress, msg)
                         zipEntry = zipInputStream.nextEntry
                     }
                 } finally {
                     zipInputStream.close()
                 }
 
+                ToolProgressBus.update(tool.name, 1f, "Unzip completed")
                 return ToolResult(
                         toolName = tool.name,
                         success = true,
@@ -2116,6 +2356,8 @@ open class DebuggerFileSystemTools(context: Context) : AccessibilityFileSystemTo
                     result = StringResultData(""),
                     error = "Error extracting zip file: ${e.message}"
             )
+        } finally {
+            ToolProgressBus.clear()
         }
     }
 
@@ -2323,312 +2565,7 @@ open class DebuggerFileSystemTools(context: Context) : AccessibilityFileSystemTo
 
     /** 下载文件 从网络URL下载文件到指定路径 */
     override suspend fun downloadFile(tool: AITool): ToolResult {
-        val environment = tool.parameters.find { it.name == "environment" }?.value
-        if (environment == "linux") {
-            return super.downloadFile(tool)
-        }
-        val url = tool.parameters.find { it.name == "url" }?.value ?: ""
-        val destPath = tool.parameters.find { it.name == "destination" }?.value ?: ""
-        PathValidator.validateAndroidPath(destPath, tool.name, "destination")?.let { return it }
-
-        if (url.isBlank() || destPath.isBlank()) {
-            return ToolResult(
-                    toolName = tool.name,
-                    success = false,
-                    result =
-                            FileOperationData(
-                                    operation = "download",
-                                    path = destPath,
-                                    successful = false,
-                                    details = "必须提供url和destination参数"
-                            ),
-                    error = "必须提供url和destination参数"
-            )
-        }
-
-        // 验证URL格式
-        if (!url.startsWith("http://") && !url.startsWith("https://")) {
-            return ToolResult(
-                    toolName = tool.name,
-                    success = false,
-                    result =
-                            FileOperationData(
-                                    operation = "download",
-                                    path = destPath,
-                                    successful = false,
-                                    details = "URL必须以http://或https://开头"
-                            ),
-                    error = "URL必须以http://或https://开头"
-            )
-        }
-
-        return try {
-            // 确保目标目录存在
-            val directory = File(destPath).parent
-            if (directory != null) {
-                val mkdirResult = AndroidShellExecutor.executeShellCommand("mkdir -p '$directory'")
-                if (!mkdirResult.success) {
-                    return ToolResult(
-                            toolName = tool.name,
-                            success = false,
-                            result =
-                                    FileOperationData(
-                                            operation = "download",
-                                            path = destPath,
-                                            successful = false,
-                                            details = "无法创建目标目录: ${mkdirResult.stderr}"
-                                    ),
-                            error = "无法创建目标目录: ${mkdirResult.stderr}"
-                    )
-                }
-            }
-
-            // 使用wget或curl下载文件
-            // 首先检查是否有wget
-            val wgetCheckResult = AndroidShellExecutor.executeShellCommand("which wget")
-
-            val downloadCommand =
-                    if (wgetCheckResult.success) {
-                        "wget '$url' -O '$destPath' --no-check-certificate -q"
-                    } else {
-                        // 如果没有wget，尝试使用curl
-                        val curlCheckResult = AndroidShellExecutor.executeShellCommand("which curl")
-                        if (!curlCheckResult.success) {
-                            // 如果wget和curl都不可用，尝试使用OkHttp下载
-                            return downloadFileWithOkHttp(url, destPath, tool.name)
-                        }
-                        "curl -L '$url' -o '$destPath' -s"
-                    }
-
-            val result = AndroidShellExecutor.executeShellCommand(downloadCommand)
-
-            if (result.success) {
-                // 验证文件是否已下载
-                val checkFileResult =
-                        AndroidShellExecutor.executeShellCommand(
-                                "test -f '$destPath' && echo 'exists' || echo 'not exists'"
-                        )
-                if (checkFileResult.stdout.trim() != "exists") {
-                    return ToolResult(
-                            toolName = tool.name,
-                            success = false,
-                            result =
-                                    FileOperationData(
-                                            operation = "download",
-                                            path = destPath,
-                                            successful = false,
-                                            details = "下载似乎已完成，但文件未被创建"
-                                    ),
-                            error = "下载似乎已完成，但文件未被创建"
-                    )
-                }
-
-                // 获取文件大小
-                val fileSizeResult =
-                        AndroidShellExecutor.executeShellCommand("stat -c %s '$destPath'")
-                val fileSize =
-                        if (fileSizeResult.success) {
-                            val size = fileSizeResult.stdout.trim().toLongOrNull() ?: 0
-                            if (size > 1024 * 1024) {
-                                String.format("%.2f MB", size / (1024.0 * 1024.0))
-                            } else if (size > 1024) {
-                                String.format("%.2f KB", size / 1024.0)
-                            } else {
-                                "$size bytes"
-                            }
-                        } else {
-                            "未知大小"
-                        }
-
-                return ToolResult(
-                        toolName = tool.name,
-                        success = true,
-                        result =
-                                FileOperationData(
-                                        operation = "download",
-                                        path = destPath,
-                                        successful = true,
-                                        details = "文件下载成功: $url -> $destPath (文件大小: $fileSize)"
-                                ),
-                        error = ""
-                )
-            } else {
-                return ToolResult(
-                        toolName = tool.name,
-                        success = false,
-                        result =
-                                FileOperationData(
-                                        operation = "download",
-                                        path = destPath,
-                                        successful = false,
-                                        details = "下载失败: ${result.stderr}"
-                                ),
-                        error = "下载失败: ${result.stderr}"
-                )
-            }
-        } catch (e: Exception) {
-            AppLogger.e(TAG, "下载文件时出错", e)
-            return ToolResult(
-                    toolName = tool.name,
-                    success = false,
-                    result =
-                            FileOperationData(
-                                    operation = "download",
-                                    path = destPath,
-                                    successful = false,
-                                    details = "下载文件时出错: ${e.message}"
-                            ),
-                    error = "下载文件时出错: ${e.message}"
-            )
-        }
-    }
-
-    private suspend fun downloadFileWithOkHttp(
-            url: String,
-            destPath: String,
-            toolName: String
-    ): ToolResult {
-        AppLogger.d(TAG, "尝试使用OkHttp下载文件: $url -> $destPath")
-
-        return try {
-            // 创建OkHttpClient实例
-            val client =
-                    OkHttpClient.Builder()
-                            .connectTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                            .readTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                            .writeTimeout(30, java.util.concurrent.TimeUnit.SECONDS)
-                            .build()
-
-            // 创建请求
-            val request = Request.Builder().url(url).build()
-
-            // 执行请求
-            val response = client.newCall(request).execute()
-
-            if (!response.isSuccessful) {
-                return ToolResult(
-                        toolName = toolName,
-                        success = false,
-                        result =
-                                FileOperationData(
-                                        operation = "download",
-                                        path = destPath,
-                                        successful = false,
-                                        details = "下载失败: HTTP ${response.code}"
-                                ),
-                        error = "下载失败: HTTP ${response.code}"
-                )
-            }
-
-            // 确保目标目录存在
-            val directory = File(destPath).parent
-            if (directory != null) {
-                val mkdirResult = AndroidShellExecutor.executeShellCommand("mkdir -p '$directory'")
-                if (!mkdirResult.success) {
-                    AppLogger.w(TAG, "警告: 创建目标目录失败: ${mkdirResult.stderr}")
-                }
-            }
-
-            // 写入文件
-            val body = response.body
-            if (body != null) {
-                val file = File(destPath)
-                val outputStream = FileOutputStream(file)
-
-                try {
-                    val buffer = ByteArray(8192)
-                    var bytesRead: Int
-                    val inputStream = body.byteStream()
-
-                    while (inputStream.read(buffer).also { bytesRead = it } != -1) {
-                        outputStream.write(buffer, 0, bytesRead)
-                    }
-
-                    outputStream.flush()
-                } finally {
-                    outputStream.close()
-                    body.close()
-                }
-
-                // 验证文件是否已下载
-                if (!file.exists() || file.length() == 0L) {
-                    return ToolResult(
-                            toolName = toolName,
-                            success = false,
-                            result =
-                                    FileOperationData(
-                                            operation = "download",
-                                            path = destPath,
-                                            successful = false,
-                                            details = "下载似乎已完成，但文件未被正确创建或为空"
-                                    ),
-                            error = "下载似乎已完成，但文件未被正确创建或为空"
-                    )
-                }
-
-                // 格式化文件大小
-                val fileSize = file.length()
-                val formattedSize =
-                        when {
-                            fileSize > 1024 * 1024 ->
-                                    String.format("%.2f MB", fileSize / (1024.0 * 1024.0))
-                            fileSize > 1024 -> String.format("%.2f KB", fileSize / 1024.0)
-                            else -> "$fileSize bytes"
-                        }
-
-                return ToolResult(
-                        toolName = toolName,
-                        success = true,
-                        result =
-                                FileOperationData(
-                                        operation = "download",
-                                        path = destPath,
-                                        successful = true,
-                                        details =
-                                                "通过OkHttp文件下载成功: $url -> $destPath (文件大小: $formattedSize)"
-                                ),
-                        error = ""
-                )
-            } else {
-                return ToolResult(
-                        toolName = toolName,
-                        success = false,
-                        result =
-                                FileOperationData(
-                                        operation = "download",
-                                        path = destPath,
-                                        successful = false,
-                                        details = "下载失败: 响应体为空"
-                                ),
-                        error = "下载失败: 响应体为空"
-                )
-            }
-        } catch (e: Exception) {
-            AppLogger.e(TAG, "使用OkHttp下载文件时出错", e)
-
-            // 提供更具体的错误信息
-            val errorMessage =
-                    when {
-                        e is java.net.UnknownHostException ->
-                                "无法解析主机名，请检查网络连接和URL是否正确: ${e.message}"
-                        e is java.io.IOException -> "网络IO错误: ${e.message}。请检查网络连接。"
-                        e is SecurityException -> "安全错误: ${e.message}。请检查应用是否有网络和存储权限。"
-                        else -> "使用OkHttp下载文件时出错: ${e.message}"
-                    }
-
-            return ToolResult(
-                    toolName = toolName,
-                    success = false,
-                    result =
-                            FileOperationData(
-                                    operation = "download",
-                                    path = destPath,
-                                    successful = false,
-                                    details = errorMessage
-                            ),
-                    error = errorMessage
-            )
-        }
+        return super.downloadFile(tool)
     }
 
     /** Write base64 encoded content to a binary file */

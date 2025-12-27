@@ -30,12 +30,14 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
 import com.ai.assistance.operit.util.FileUtils
 import com.ai.assistance.operit.util.SyntaxCheckUtil
 import com.ai.assistance.operit.util.PathMapper
 import com.ai.assistance.operit.util.ImagePoolManager
+import com.ai.assistance.operit.util.HttpMultiPartDownloader
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.catch
@@ -52,6 +54,7 @@ import com.ai.assistance.operit.terminal.provider.filesystem.FileSystemProvider
 import com.ai.assistance.operit.terminal.utils.SSHFileConnectionManager
 import com.ai.assistance.operit.core.tools.defaultTool.PathValidator
 import com.ai.assistance.operit.services.OnnxEmbeddingService
+import com.ai.assistance.operit.core.tools.ToolProgressBus
 
 /**
  * Collection of file system operation tools for the AI assistant These tools use Java File APIs for
@@ -2199,6 +2202,7 @@ open class StandardFileSystemTools(protected val context: Context) {
         }
 
         return try {
+            ToolProgressBus.update(tool.name, 0f, "Searching...")
             val rootDir = File(path)
 
             if (!rootDir.exists() || !rootDir.isDirectory) {
@@ -2241,6 +2245,7 @@ open class StandardFileSystemTools(protected val context: Context) {
 
             // Recursively find matching files
             val matchingFiles = mutableListOf<String>()
+            val progress = FindFilesProgressState(lastPath = rootDir.absolutePath)
             findMatchingFiles(
                 rootDir,
                 regex,
@@ -2248,8 +2253,12 @@ open class StandardFileSystemTools(protected val context: Context) {
                 usePathPattern,
                 maxDepth,
                 0,
-                rootDir.absolutePath
+                rootDir.absolutePath,
+                tool.name,
+                progress
             )
+
+            ToolProgressBus.update(tool.name, 1f, "Search completed, found ${matchingFiles.size}")
 
             return ToolResult(
                 toolName = tool.name,
@@ -2311,6 +2320,15 @@ open class StandardFileSystemTools(protected val context: Context) {
         }
     }
 
+    private data class FindFilesProgressState(
+        var visited: Int = 0,
+        var discovered: Int = 1,
+        var matched: Int = 0,
+        var progressFloor: Float = 0f,
+        var lastUpdateTimeMs: Long = 0L,
+        var lastPath: String = ""
+    )
+
     /** Helper method to recursively find files matching a pattern */
     private fun findMatchingFiles(
         dir: File,
@@ -2319,13 +2337,47 @@ open class StandardFileSystemTools(protected val context: Context) {
         usePathPattern: Boolean,
         maxDepth: Int,
         currentDepth: Int,
-        rootPath: String
+        rootPath: String,
+        toolName: String,
+        progress: FindFilesProgressState
     ) {
         if (maxDepth >= 0 && currentDepth > maxDepth) {
             return
         }
 
         val files = dir.listFiles() ?: return
+
+        progress.visited++
+        progress.discovered += files.size
+        progress.lastPath = dir.absolutePath
+
+        val now = System.currentTimeMillis()
+        if (progress.lastUpdateTimeMs == 0L) {
+            progress.lastUpdateTimeMs = now
+        }
+        if (now - progress.lastUpdateTimeMs >= 500L || progress.visited % 200 == 0) {
+            val candidate =
+                if (progress.discovered > 0) {
+                    (progress.visited.toFloat() / progress.discovered.toFloat()).coerceIn(0f, 1f)
+                } else {
+                    0f
+                }
+            if (candidate > progress.progressFloor) {
+                progress.progressFloor = candidate
+            }
+            val rel =
+                if (progress.lastPath.startsWith(rootPath)) {
+                    progress.lastPath.removePrefix(rootPath).trimStart(File.separatorChar).ifBlank { "." }
+                } else {
+                    progress.lastPath
+                }
+            ToolProgressBus.update(
+                toolName,
+                progress.progressFloor,
+                "Searching... scanned ${progress.visited}, found ${progress.matched} (at $rel)"
+            )
+            progress.lastUpdateTimeMs = now
+        }
 
         for (file in files) {
             val relativePath = file.absolutePath.substring(rootPath.length + 1)
@@ -2334,9 +2386,13 @@ open class StandardFileSystemTools(protected val context: Context) {
 
             if (regex.matches(testString)) {
                 results.add(file.absolutePath)
+                progress.matched++
             }
 
             if (file.isDirectory) {
+                if (maxDepth >= 0 && currentDepth + 1 > maxDepth) {
+                    continue
+                }
                 findMatchingFiles(
                     file,
                     regex,
@@ -2344,8 +2400,37 @@ open class StandardFileSystemTools(protected val context: Context) {
                     usePathPattern,
                     maxDepth,
                     currentDepth + 1,
-                    rootPath
+                    rootPath,
+                    toolName,
+                    progress
                 )
+            } else {
+                progress.visited++
+                progress.lastPath = file.absolutePath
+                val nowFile = System.currentTimeMillis()
+                if (nowFile - progress.lastUpdateTimeMs >= 500L || progress.visited % 200 == 0) {
+                    val candidate =
+                        if (progress.discovered > 0) {
+                            (progress.visited.toFloat() / progress.discovered.toFloat()).coerceIn(0f, 1f)
+                        } else {
+                            0f
+                        }
+                    if (candidate > progress.progressFloor) {
+                        progress.progressFloor = candidate
+                    }
+                    val rel =
+                        if (progress.lastPath.startsWith(rootPath)) {
+                            progress.lastPath.removePrefix(rootPath).trimStart(File.separatorChar)
+                        } else {
+                            progress.lastPath
+                        }
+                    ToolProgressBus.update(
+                        toolName,
+                        progress.progressFloor,
+                        "Searching... scanned ${progress.visited}, found ${progress.matched} (at $rel)"
+                    )
+                    progress.lastUpdateTimeMs = nowFile
+                }
             }
         }
     }
@@ -2630,6 +2715,7 @@ open class StandardFileSystemTools(protected val context: Context) {
         }
 
         return try {
+            ToolProgressBus.update(tool.name, -1f, "Preparing to unzip...")
             val zipFile = File(actualZipPath)
             val destDir = File(actualDestPath)
 
@@ -2656,7 +2742,15 @@ open class StandardFileSystemTools(protected val context: Context) {
                 destDir.mkdirs()
             }
 
-            val buffer = ByteArray(1024)
+            val totalEntries = try {
+                ZipFile(zipFile).use { it.size() }
+            } catch (_: Exception) {
+                null
+            }
+            var processedEntries = 0
+
+            val destDirCanonical = destDir.canonicalPath + File.separator
+            val buffer = ByteArray(64 * 1024)
 
             ZipInputStream(BufferedInputStream(FileInputStream(zipFile))).use { zis ->
                 var zipEntry: ZipEntry? = zis.nextEntry
@@ -2664,6 +2758,11 @@ open class StandardFileSystemTools(protected val context: Context) {
                 while (zipEntry != null) {
                     val fileName = zipEntry.name
                     val newFile = File(destDir, fileName)
+
+                    val newFileCanonical = newFile.canonicalPath
+                    if (!newFileCanonical.startsWith(destDirCanonical)) {
+                        throw SecurityException("Zip entry is outside of the target dir: $fileName")
+                    }
 
                     // Create parent directories if needed
                     val parentDir = newFile.parentFile
@@ -2691,10 +2790,25 @@ open class StandardFileSystemTools(protected val context: Context) {
                     }
 
                     zis.closeEntry()
+                    processedEntries++
+                    val progress =
+                        if (totalEntries != null && totalEntries > 0) {
+                            (processedEntries.toFloat() / totalEntries.toFloat()).coerceIn(0f, 1f)
+                        } else {
+                            -1f
+                        }
+                    val msg =
+                        if (totalEntries != null && totalEntries > 0) {
+                            "Unzipping... ($processedEntries/$totalEntries)"
+                        } else {
+                            "Unzipping..."
+                        }
+                    ToolProgressBus.update(tool.name, progress, msg)
                     zipEntry = zis.nextEntry
                 }
             }
 
+            ToolProgressBus.update(tool.name, 1f, "Unzip completed")
             return ToolResult(
                 toolName = tool.name,
                 success = true,
@@ -2716,6 +2830,8 @@ open class StandardFileSystemTools(protected val context: Context) {
                 result = StringResultData(""),
                 error = "Error extracting zip file: ${e.message}"
             )
+        } finally {
+            ToolProgressBus.clear()
         }
     }
 
@@ -2726,259 +2842,273 @@ open class StandardFileSystemTools(protected val context: Context) {
         val path = tool.parameters.find { it.name == "path" }?.value ?: ""
         val environment = tool.parameters.find { it.name == "environment" }?.value
         val aiGeneratedCode = tool.parameters.find { it.name == "content" }?.value ?: ""
-        PathValidator.validateAndroidPath(path, tool.name)?.let {
-            emit(it)
-            return@flow
-        }
+        ToolProgressBus.update(tool.name, 0f, "Preparing...")
+        try {
+            PathValidator.validateAndroidPath(path, tool.name)?.let {
+                emit(it)
+                return@flow
+            }
 
-        if (path.isBlank()) {
-            emit(
-                ToolResult(
-                    toolName = tool.name,
-                    success = false,
-                    result =
-                    FileOperationData(
-                        operation = "apply",
-                        path = "",
-                        successful = false,
-                        details = "Path parameter is required"
-                    ),
-                    error = "Path parameter is required"
-                )
-            )
-            return@flow
-        }
-
-        if (aiGeneratedCode.isBlank()) {
-            emit(
-                ToolResult(
-                    toolName = tool.name,
-                    success = false,
-                    result =
-                    FileOperationData(
-                        operation = "apply",
-                        path = path,
-                        successful = false,
-                        details = "Content parameter is required"
-                    ),
-                    error = "Content parameter is required"
-                )
-            )
-            return@flow
-        }
-
-        // 1. 检查文件是否存在
-        val fileExistsResult =
-            fileExists(
-                AITool(
-                    name = "file_exists", parameters = listOf(
-                        ToolParameter("path", path),
-                        ToolParameter("environment", environment ?: "")
-                    )
-                )
-            )
-
-        if (!fileExistsResult.success ||
-            !(fileExistsResult.result as FileExistsData).exists
-        ) {
-            // 文件不存在，直接创建并写入内容
-            AppLogger.d(TAG, "File does not exist. Creating new file '$path'...")
-
-            val writeResult = writeFile(
-                AITool(
-                    name = "write_file",
-                    parameters = listOf(
-                        ToolParameter("path", path),
-                        ToolParameter("content", aiGeneratedCode),
-                        ToolParameter("environment", environment ?: "")
-                    )
-                )
-            )
-
-            val diffContent = FileBindingService(context).generateUnifiedDiff("", aiGeneratedCode)
-
-            if (writeResult.success) {
-                emit(
-                    ToolResult(
-                        toolName = tool.name,
-                        success = true,
-                        result = FileApplyResultData(
-                            operation = FileOperationData(
-                                operation = "create",
-                                path = path,
-                                successful = true,
-                                details = "Successfully created new file: $path"
-                            ),
-                            aiDiffInstructions = "",
-                            syntaxCheckResult = null,
-                            diffContent = diffContent
-                        )
-                    )
-                )
-            } else {
+            if (path.isBlank()) {
                 emit(
                     ToolResult(
                         toolName = tool.name,
                         success = false,
-                        result = FileOperationData(
-                            operation = "create",
+                        result =
+                        FileOperationData(
+                            operation = "apply",
+                            path = "",
+                            successful = false,
+                            details = "Path parameter is required"
+                        ),
+                        error = "Path parameter is required"
+                    )
+                )
+                return@flow
+            }
+
+            if (aiGeneratedCode.isBlank()) {
+                emit(
+                    ToolResult(
+                        toolName = tool.name,
+                        success = false,
+                        result =
+                        FileOperationData(
+                            operation = "apply",
                             path = path,
                             successful = false,
-                            details = "Failed to create new file: ${writeResult.error}"
+                            details = "Content parameter is required"
                         ),
-                        error = "Failed to create new file: ${writeResult.error}"
+                        error = "Content parameter is required"
                     )
                 )
+                return@flow
             }
-            return@flow
-        }
 
-        // 2. 读取原始文件内容
-        val readResult =
-            readFileFull(
-                AITool(
-                    name = "read_file_full", parameters = listOf(
-                        ToolParameter("path", path),
-                        ToolParameter("environment", environment ?: "")
+            ToolProgressBus.update(tool.name, 0.05f, "Checking file...")
+            val fileExistsResult =
+                fileExists(
+                    AITool(
+                        name = "file_exists", parameters = listOf(
+                            ToolParameter("path", path),
+                            ToolParameter("environment", environment ?: "")
+                        )
                     )
                 )
-            )
 
-        if (!readResult.success) {
-            emit(
-                ToolResult(
-                    toolName = tool.name,
-                    success = false,
-                    result =
-                    FileOperationData(
-                        operation = "apply",
-                        path = path,
-                        successful = false,
-                        details =
-                        "Failed to read original file: ${readResult.error}"
-                    ),
-                    error = "Failed to read original file: ${readResult.error}"
-                )
-            )
-            return@flow
-        }
+            if (!fileExistsResult.success ||
+                !(fileExistsResult.result as FileExistsData).exists
+            ) {
+                ToolProgressBus.update(tool.name, 0.4f, "Creating file...")
+                AppLogger.d(TAG, "File does not exist. Creating new file '$path'...")
 
-        // 提取原始文件内容
-        val originalContent = (readResult.result as? FileContentData)?.content ?: ""
-
-        if (!aiGeneratedCode.contains("[START-")) {
-            val errorMsg =
-                "如果你想覆盖这个文件，请删除文件后再写入;如果你想修改文件，请严格使用OLD/NEW的格式进行替换或者使用DELETE进行删除部分。" +
-                "所有补丁内容都必须写在 apply_file 的 content 参数里，并使用 [START-REPLACE]/[START-DELETE] + [OLD]/[NEW] 这样的结构化块，而不是直接输出整个文件的新内容进行覆盖。"
-            AppLogger.w(
-                TAG,
-                "apply_file requested full overwrite without structured edit blocks for existing file: $path. $errorMsg"
-            )
-            emit(
-                ToolResult(
-                    toolName = tool.name,
-                    success = false,
-                    result =
-                    FileOperationData(
-                        operation = "apply",
-                        path = path,
-                        successful = false,
-                        details = errorMsg
-                    ),
-                    error = errorMsg
-                )
-            )
-            return@flow
-        }
-
-        // 2. 使用FileBindingService处理文件绑定
-        val bindingResult =
-            EnhancedAIService.applyFileBinding(context, originalContent, aiGeneratedCode)
-        val mergedContent = bindingResult.first
-        val aiInstructions = bindingResult.second
-
-        // 检查文件绑定是否返回错误
-        if (aiInstructions.startsWith("Error", ignoreCase = true)) {
-            AppLogger.e(TAG, "File binding failed: $aiInstructions")
-            emit(
-                ToolResult(
-                    toolName = tool.name,
-                    success = false,
-                    result =
-                    FileOperationData(
-                        operation = "apply",
-                        path = path,
-                        successful = false,
-                        details = "File binding failed: $aiInstructions"
-                    ),
-                    error = aiInstructions
-                )
-            )
-            return@flow
-        }
-
-        // 3. 将合并后的内容写回文件
-        val writeResult =
-            writeFile(
-                AITool(
-                    name = "write_file",
-                    parameters =
-                    listOf(
-                        ToolParameter("path", path),
-                        ToolParameter("content", mergedContent),
-                        ToolParameter("append", "false"),
-                        ToolParameter("environment", environment ?: "")
+                val writeResult = writeFile(
+                    AITool(
+                        name = "write_file",
+                        parameters = listOf(
+                            ToolParameter("path", path),
+                            ToolParameter("content", aiGeneratedCode),
+                            ToolParameter("environment", environment ?: "")
+                        )
                     )
                 )
-            )
 
-        if (!writeResult.success) {
+                val diffContent = FileBindingService(context).generateUnifiedDiff("", aiGeneratedCode)
+
+                if (writeResult.success) {
+                    ToolProgressBus.update(tool.name, 1f, "Completed")
+                    emit(
+                        ToolResult(
+                            toolName = tool.name,
+                            success = true,
+                            result = FileApplyResultData(
+                                operation = FileOperationData(
+                                    operation = "create",
+                                    path = path,
+                                    successful = true,
+                                    details = "Successfully created new file: $path"
+                                ),
+                                aiDiffInstructions = "",
+                                syntaxCheckResult = null,
+                                diffContent = diffContent
+                            )
+                        )
+                    )
+                } else {
+                    emit(
+                        ToolResult(
+                            toolName = tool.name,
+                            success = false,
+                            result = FileOperationData(
+                                operation = "create",
+                                path = path,
+                                successful = false,
+                                details = "Failed to create new file: ${writeResult.error}"
+                            ),
+                            error = "Failed to create new file: ${writeResult.error}"
+                        )
+                    )
+                }
+                return@flow
+            }
+
+            ToolProgressBus.update(tool.name, 0.15f, "Reading file...")
+            val readResult =
+                readFileFull(
+                    AITool(
+                        name = "read_file_full", parameters = listOf(
+                            ToolParameter("path", path),
+                            ToolParameter("environment", environment ?: "")
+                        )
+                    )
+                )
+
+            if (!readResult.success) {
+                emit(
+                    ToolResult(
+                        toolName = tool.name,
+                        success = false,
+                        result =
+                        FileOperationData(
+                            operation = "apply",
+                            path = path,
+                            successful = false,
+                            details =
+                            "Failed to read original file: ${readResult.error}"
+                        ),
+                        error = "Failed to read original file: ${readResult.error}"
+                    )
+                )
+                return@flow
+            }
+
+            val originalContent = (readResult.result as? FileContentData)?.content ?: ""
+
+            if (!aiGeneratedCode.contains("[START-")) {
+                val errorMsg =
+                    "如果你想覆盖这个文件，请删除文件后再写入;如果你想修改文件，请严格使用OLD/NEW的格式进行替换或者使用DELETE进行删除部分。" +
+                    "所有补丁内容都必须写在 apply_file 的 content 参数里，并使用 [START-REPLACE]/[START-DELETE] + [OLD]/[NEW] 这样的结构化块，而不是直接输出整个文件的新内容进行覆盖。"
+                AppLogger.w(
+                    TAG,
+                    "apply_file requested full overwrite without structured edit blocks for existing file: $path. $errorMsg"
+                )
+                emit(
+                    ToolResult(
+                        toolName = tool.name,
+                        success = false,
+                        result =
+                        FileOperationData(
+                            operation = "apply",
+                            path = path,
+                            successful = false,
+                            details = errorMsg
+                        ),
+                        error = errorMsg
+                    )
+                )
+                return@flow
+            }
+
+            ToolProgressBus.update(tool.name, 0.2f, "Applying patch...")
+            val lastEmitMs = java.util.concurrent.atomic.AtomicLong(0L)
+            val bindingResult =
+                EnhancedAIService.applyFileBinding(context, originalContent, aiGeneratedCode) { p, msg ->
+                    val now = System.currentTimeMillis()
+                    val last = lastEmitMs.get()
+                    if (now - last < 200L) return@applyFileBinding
+                    if (!lastEmitMs.compareAndSet(last, now)) return@applyFileBinding
+
+                    val mapped = (0.2f + 0.6f * p).coerceIn(0f, 0.99f)
+                    ToolProgressBus.update(tool.name, mapped, msg)
+                }
+            val mergedContent = bindingResult.first
+            val aiInstructions = bindingResult.second
+
+            if (aiInstructions.startsWith("Error", ignoreCase = true)) {
+                AppLogger.e(TAG, "File binding failed: $aiInstructions")
+                emit(
+                    ToolResult(
+                        toolName = tool.name,
+                        success = false,
+                        result =
+                        FileOperationData(
+                            operation = "apply",
+                            path = path,
+                            successful = false,
+                            details = "File binding failed: $aiInstructions"
+                        ),
+                        error = aiInstructions
+                    )
+                )
+                return@flow
+            }
+
+            ToolProgressBus.update(tool.name, 0.85f, "Writing file...")
+            val writeResult =
+                writeFile(
+                    AITool(
+                        name = "write_file",
+                        parameters =
+                        listOf(
+                            ToolParameter("path", path),
+                            ToolParameter("content", mergedContent),
+                            ToolParameter("append", "false"),
+                            ToolParameter("environment", environment ?: "")
+                        )
+                    )
+                )
+
+            if (!writeResult.success) {
+                emit(
+                    ToolResult(
+                        toolName = tool.name,
+                        success = false,
+                        result =
+                        FileOperationData(
+                            operation = "apply",
+                            path = path,
+                            successful = false,
+                            details =
+                            "Failed to write merged content: ${writeResult.error}"
+                        ),
+                        error = "Failed to write merged content: ${writeResult.error}"
+                    )
+                )
+                return@flow
+            }
+
+            val operationData =
+                FileOperationData(
+                    operation = "apply",
+                    path = path,
+                    successful = true,
+                    details = "Successfully applied AI code to file: $path"
+                )
+
+            ToolProgressBus.update(tool.name, 0.92f, "Checking syntax...")
+            val syntaxCheckResult = performSyntaxCheck(path, mergedContent)
+            ToolProgressBus.update(tool.name, 0.96f, "Generating diff...")
+            val diffContent =
+                FileBindingService(context).generateUnifiedDiff(originalContent, mergedContent)
+            ToolProgressBus.update(tool.name, 1f, "Completed")
+
             emit(
                 ToolResult(
                     toolName = tool.name,
-                    success = false,
+                    success = true,
                     result =
-                    FileOperationData(
-                        operation = "apply",
-                        path = path,
-                        successful = false,
-                        details =
-                        "Failed to write merged content: ${writeResult.error}"
+                    FileApplyResultData(
+                        operation = operationData,
+                        aiDiffInstructions = aiInstructions,
+                        syntaxCheckResult = syntaxCheckResult,
+                        diffContent = diffContent
                     ),
-                    error = "Failed to write merged content: ${writeResult.error}"
+                    error = ""
                 )
             )
-            return@flow
+        } finally {
+            ToolProgressBus.clear()
         }
-
-        // 成功完成
-        val operationData =
-            FileOperationData(
-                operation = "apply",
-                path = path,
-                successful = true,
-                details = "Successfully applied AI code to file: $path"
-            )
-
-        // 执行语法检查
-        val syntaxCheckResult = performSyntaxCheck(path, mergedContent)
-        val diffContent =
-            FileBindingService(context).generateUnifiedDiff(originalContent, mergedContent)
-
-        emit(
-            ToolResult(
-                toolName = tool.name,
-                success = true,
-                result =
-                FileApplyResultData(
-                    operation = operationData,
-                    aiDiffInstructions = aiInstructions,
-                    syntaxCheckResult = syntaxCheckResult,
-                    diffContent = diffContent
-                ),
-                error = ""
-            )
-        )
     }
         .catch { e ->
             AppLogger.e(TAG, "Error applying file binding", e)
@@ -3043,96 +3173,73 @@ open class StandardFileSystemTools(protected val context: Context) {
         return try {
             val destFile = File(actualDestPath)
 
-            // Create parent directory if needed
-            val destParent = destFile.parentFile
-            if (destParent != null && !destParent.exists()) {
-                destParent.mkdirs()
-            }
-
-            // Open connection to URL
-            val connection = URL(url).openConnection() as HttpURLConnection
-            connection.connectTimeout = 15000
-            connection.readTimeout = 30000
-            connection.instanceFollowRedirects = true
-
-            val responseCode = connection.responseCode
-            if (responseCode != HttpURLConnection.HTTP_OK) {
-                return ToolResult(
-                    toolName = tool.name,
-                    success = false,
-                    result =
-                    FileOperationData(
-                        operation = "download",
-                        path = destPath,
-                        successful = false,
-                        details =
-                        "Failed to download: HTTP error code $responseCode"
-                    ),
-                    error = "Failed to download: HTTP error code $responseCode"
-                )
-            }
-
-            // Get file size for progress tracking
-            val fileSize = connection.contentLength
-
-            // Download the file
-            connection.inputStream.use { input ->
-                FileOutputStream(destFile).use { output ->
-                    val buffer = ByteArray(4096)
-                    var bytesRead: Int
-                    var totalBytesRead = 0L
-
-                    while (input.read(buffer).also { bytesRead = it } != -1) {
-                        output.write(buffer, 0, bytesRead)
-                        totalBytesRead += bytesRead
-                    }
+            fun formatSize(bytes: Long): String {
+                return when {
+                    bytes > 1024 * 1024 -> String.format("%.2f MB", bytes / (1024.0 * 1024.0))
+                    bytes > 1024 -> String.format("%.2f KB", bytes / 1024.0)
+                    else -> "$bytes bytes"
                 }
             }
 
-            // Verify download was successful
-            if (destFile.exists()) {
-                val fileSize = destFile.length()
-                val formattedSize =
-                    when {
-                        fileSize > 1024 * 1024 ->
-                            String.format(
-                                "%.2f MB",
-                                fileSize / (1024.0 * 1024.0)
-                            )
+            ToolProgressBus.update(tool.name, 0f, "Connecting...")
+            try {
+                val destParent = destFile.parentFile
+                if (destParent != null && !destParent.exists()) {
+                    destParent.mkdirs()
+                }
 
-                        fileSize > 1024 ->
-                            String.format("%.2f KB", fileSize / 1024.0)
+                val lastEmitMs = java.util.concurrent.atomic.AtomicLong(0L)
+                HttpMultiPartDownloader.download(url, destFile, threadCount = 4) { downloaded, total ->
+                    val now = System.currentTimeMillis()
+                    val last = lastEmitMs.get()
+                    if (now - last < 200L) return@download
+                    if (!lastEmitMs.compareAndSet(last, now)) return@download
 
-                        else -> "$fileSize bytes"
-                    }
+                    val p = if (total > 0L) (downloaded.toFloat() / total.toFloat()).coerceIn(0f, 0.99f) else -1f
+                    val msg =
+                        if (total > 0L) {
+                            val percent = ((downloaded.toDouble() / total.toDouble()) * 100.0).toInt().coerceIn(0, 99)
+                            "Downloading... $percent% (${formatSize(downloaded)}/${formatSize(total)})"
+                        } else {
+                            "Downloading... ${formatSize(downloaded)}"
+                        }
+                    ToolProgressBus.update(tool.name, p, msg)
+                }
+                ToolProgressBus.update(tool.name, 1f, "Completed")
 
-                return ToolResult(
-                    toolName = tool.name,
-                    success = true,
-                    result =
-                    FileOperationData(
-                        operation = "download",
-                        path = destPath,
-                        successful = true,
-                        details =
-                        "File downloaded successfully: $url -> $destPath (file size: $formattedSize)"
-                    ),
-                    error = ""
-                )
-            } else {
-                return ToolResult(
-                    toolName = tool.name,
-                    success = false,
-                    result =
-                    FileOperationData(
-                        operation = "download",
-                        path = destPath,
-                        successful = false,
-                        details =
-                        "Download completed but file was not created"
-                    ),
-                    error = "Download completed but file was not created"
-                )
+                if (destFile.exists()) {
+                    val fileSize = destFile.length()
+                    val formattedSize = formatSize(fileSize)
+                    return ToolResult(
+                        toolName = tool.name,
+                        success = true,
+                        result =
+                        FileOperationData(
+                            operation = "download",
+                            path = destPath,
+                            successful = true,
+                            details =
+                            "File downloaded successfully: $url -> $destPath (file size: $formattedSize)"
+                        ),
+                        error = ""
+                    )
+                } else {
+                    return ToolResult(
+                        toolName = tool.name,
+                        success = false,
+                        result =
+                        FileOperationData(
+                            operation = "download",
+                            path = destPath,
+                            successful = false,
+                            details =
+                            "Download completed but file was not created"
+                        ),
+                        error = "Download completed but file was not created"
+                    )
+                }
+            } finally {
+                ToolProgressBus.clear()
             }
         } catch (e: Exception) {
             AppLogger.e(TAG, "Error downloading file", e)

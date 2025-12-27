@@ -17,6 +17,12 @@ sealed class InputProcessingState {
     /** 新增：正在执行工具 */
     data class ExecutingTool(val toolName: String) : InputProcessingState()
 
+    data class ToolProgress(
+        val toolName: String,
+        val progress: Float,
+        val message: String = ""
+    ) : InputProcessingState()
+
     /** 新增：正在处理工具结果 */
     data class ProcessingToolResult(val toolName: String) : InputProcessingState()
 

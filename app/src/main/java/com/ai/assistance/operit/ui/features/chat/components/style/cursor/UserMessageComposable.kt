@@ -61,6 +61,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import com.ai.assistance.operit.R
 import com.ai.assistance.operit.data.model.ChatMessage
+import com.ai.assistance.operit.ui.features.chat.components.attachments.AttachmentViewerDialog
+import com.ai.assistance.operit.ui.features.chat.components.attachments.ChatAttachment
 import com.ai.assistance.operit.util.ImageBitmapLimiter
 import com.ai.assistance.operit.util.ImagePoolManager
 import java.io.File
@@ -82,8 +84,7 @@ fun UserMessageComposable(message: ChatMessage, backgroundColor: Color, textColo
 
     // 添加状态控制内容预览
     val showContentPreview = remember { mutableStateOf(false) }
-    val selectedAttachmentContent = remember { mutableStateOf("") }
-    val selectedAttachmentName = remember { mutableStateOf("") }
+    val selectedChatAttachment = remember { mutableStateOf<ChatAttachment?>(null) }
 
     // 添加状态控制图片预览
     val showImagePreview = remember { mutableStateOf(false) }
@@ -174,39 +175,15 @@ fun UserMessageComposable(message: ChatMessage, backgroundColor: Color, textColo
                         textColor = textColor,
                         backgroundColor = backgroundColor,
                         onClick = { attachmentData ->
-                            // 当点击附件标签时，显示内容预览
-                            if (attachmentData.content.isNotEmpty()) {
-                                selectedAttachmentContent.value =
-                                    attachmentData.content
-                                selectedAttachmentName.value =
-                                    attachmentData.filename
-                                showContentPreview.value = true
-                            } else if (attachmentData.id.startsWith("/storage/")) {
-                                scope.launch(Dispatchers.IO) {
-                                    try {
-                                        val fileContent =
-                                            File(attachmentData.id)
-                                                .readText()
-                                        withContext(Dispatchers.Main) {
-                                            selectedAttachmentContent
-                                                .value =
-                                                fileContent
-                                            selectedAttachmentName
-                                                .value =
-                                                attachmentData
-                                                    .filename
-                                            showContentPreview
-                                                .value = true
-                                        }
-                                    } catch (e: Exception) {
-                                        com.ai.assistance.operit.util.AppLogger.e(
-                                            "UserMessageComposable",
-                                            "Error reading attachment file",
-                                            e
-                                        )
-                                    }
-                                }
-                            }
+                            selectedChatAttachment.value =
+                                ChatAttachment(
+                                    id = attachmentData.id,
+                                    filename = attachmentData.filename,
+                                    mimeType = attachmentData.type,
+                                    size = attachmentData.size,
+                                    content = attachmentData.content
+                                )
+                            showContentPreview.value = true
                         }
                     )
                     Spacer(modifier = Modifier.width(4.dp))
@@ -244,113 +221,11 @@ fun UserMessageComposable(message: ChatMessage, backgroundColor: Color, textColo
 
     // 内容预览对话框
     if (showContentPreview.value) {
-        Dialog(onDismissRequest = { showContentPreview.value = false }) {
-            Surface(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .heightIn(max = 400.dp),
-                shape = RoundedCornerShape(8.dp),
-                color = MaterialTheme.colorScheme.surface,
-                tonalElevation = 4.dp
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    // 头部
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Row(
-                            verticalAlignment =
-                            Alignment.CenterVertically,
-                            horizontalArrangement =
-                            Arrangement.spacedBy(8.dp)
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Code,
-                                contentDescription = null,
-                                tint =
-                                MaterialTheme.colorScheme
-                                    .primary
-                            )
-                            Text(
-                                text = selectedAttachmentName.value,
-                                style =
-                                MaterialTheme.typography
-                                    .titleMedium,
-                                color =
-                                MaterialTheme.colorScheme
-                                    .onSurface
-                            )
-                        }
-
-                        IconButton(
-                            onClick = {
-                                showContentPreview.value = false
-                            }
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Close,
-                                contentDescription = context.getString(R.string.close),
-                                tint =
-                                MaterialTheme.colorScheme
-                                    .onSurface
-                            )
-                        }
-                    }
-
-                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-
-                    // 内容区域
-                    Box(
-                        modifier =
-                        Modifier
-                            .fillMaxWidth()
-                            .wrapContentHeight(
-                                align = Alignment.Top
-                            )
-                            .weight(1f, fill = false)
-                            .border(
-                                width = 1.dp,
-                                color =
-                                MaterialTheme
-                                    .colorScheme
-                                    .surfaceVariant,
-                                shape =
-                                RoundedCornerShape(
-                                    4.dp
-                                )
-                            )
-                            .padding(8.dp)
-                            .verticalScroll(
-                                rememberScrollState()
-                            )
-                    ) {
-                        Text(
-                            text = selectedAttachmentContent.value,
-                            style = MaterialTheme.typography.bodySmall,
-                            fontFamily = FontFamily.Monospace
-                        )
-                    }
-
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    // 复制按钮
-                    Button(
-                        onClick = {
-                            clipboardManager.setText(
-                                AnnotatedString(
-                                    selectedAttachmentContent
-                                        .value
-                                )
-                            )
-                            showContentPreview.value = false
-                        },
-                        modifier = Modifier.align(Alignment.End)
-                    ) { Text(context.getString(R.string.copy_content)) }
-                }
-            }
-        }
+        AttachmentViewerDialog(
+            visible = true,
+            attachment = selectedChatAttachment.value,
+            onDismiss = { showContentPreview.value = false }
+        )
     }
 
     // 图片预览对话框
@@ -698,7 +573,9 @@ private fun AttachmentTag(
             .clickable(
                 enabled =
                 attachment.content.isNotEmpty() ||
-                        attachment.id.startsWith("/storage/") ||
+                        attachment.id.startsWith("/") ||
+                        attachment.id.startsWith("content://") ||
+                        attachment.id.startsWith("file://") ||
                         attachment.type.startsWith("image/"),
                 onClick = { onClick(attachment) }
             ),

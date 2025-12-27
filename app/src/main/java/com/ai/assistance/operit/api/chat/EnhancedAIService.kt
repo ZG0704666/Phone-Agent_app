@@ -194,7 +194,8 @@ class EnhancedAIService private constructor(private val context: Context) {
         suspend fun applyFileBinding(
                 context: Context,
                 originalContent: String,
-                aiGeneratedCode: String
+                aiGeneratedCode: String,
+                onProgress: ((Float, String) -> Unit)? = null
         ): Pair<String, String> {
             // 获取EnhancedAIService实例
             val instance = getInstance(context)
@@ -202,7 +203,8 @@ class EnhancedAIService private constructor(private val context: Context) {
             // 委托给FileBindingService处理
             return instance.fileBindingService.processFileBinding(
                     originalContent,
-                    aiGeneratedCode
+                    aiGeneratedCode,
+                    onProgress
             )
         }
 

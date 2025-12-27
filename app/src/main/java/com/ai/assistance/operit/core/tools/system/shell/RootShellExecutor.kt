@@ -4,13 +4,18 @@ import android.content.Context
 import com.ai.assistance.operit.util.AppLogger
 import com.ai.assistance.operit.core.tools.system.AndroidPermissionLevel
 import com.ai.assistance.operit.core.tools.system.ShellIdentity
+import com.topjohnwu.superuser.CallbackList
 import com.topjohnwu.superuser.Shell
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -420,39 +425,39 @@ class RootShellExecutor(private val context: Context) : ShellExecutor {
  * 使用 libsu 实现的 ShellProcess。
  */
 private class LibSuShellProcess(command: String) : ShellProcess {
-    private val shell: Shell = Shell.getShell()
+    private val stdoutChannel = Channel<String>(capacity = 256, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    private val stderrChannel = Channel<String>(capacity = 256, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+
+    private val stdoutCallbackList = object : CallbackList<String>() {
+        override fun onAddElement(s: String) {
+            stdoutChannel.trySend(s)
+            if (size > 2048) clear()
+        }
+    }
+    private val stderrCallbackList = object : CallbackList<String>() {
+        override fun onAddElement(s: String) {
+            stderrChannel.trySend(s)
+            if (size > 2048) clear()
+        }
+    }
+
     // Execute the job asynchronously - enqueue() returns a Future in v6.0.0
-    private val future: java.util.concurrent.Future<Shell.Result> = shell.newJob().add(command).enqueue()
+    private val future: java.util.concurrent.Future<Shell.Result> =
+        Shell.cmd(command).to(stdoutCallbackList, stderrCallbackList).enqueue()
 
-    override val stdout: Flow<String> = callbackFlow {
+    private val closeJob: Job = CoroutineScope(Dispatchers.IO).launch {
         try {
-            val result = future.get()
-            result.out.forEach { line ->
-                trySend(line)
-            }
+            future.get()
         } catch (e: Exception) {
-            // Handle any execution errors
-            AppLogger.e("RootShellExecutor", "Error getting shell result", e)
+            AppLogger.e("RootShellExecutor", "Error waiting for shell result", e)
+        } finally {
+            stdoutChannel.close()
+            stderrChannel.close()
         }
-        close()
-        awaitClose { }
     }
-        .flowOn(Dispatchers.IO)
 
-    override val stderr: Flow<String> = callbackFlow {
-        try {
-            val result = future.get()
-            result.err.forEach { line ->
-                trySend(line)
-            }
-        } catch (e: Exception) {
-            // Handle any execution errors
-            AppLogger.e("RootShellExecutor", "Error getting shell result", e)
-        }
-        close()
-        awaitClose { }
-    }
-        .flowOn(Dispatchers.IO)
+    override val stdout: Flow<String> = stdoutChannel.receiveAsFlow()
+    override val stderr: Flow<String> = stderrChannel.receiveAsFlow()
 
     override val isAlive: Boolean
         get() = !future.isDone
@@ -460,6 +465,9 @@ private class LibSuShellProcess(command: String) : ShellProcess {
     override fun destroy() {
         // Cancel the future if it's still running
         future.cancel(true)
+        closeJob.cancel()
+        stdoutChannel.close()
+        stderrChannel.close()
     }
 
     override suspend fun waitFor(): Int = withContext(Dispatchers.IO) {
@@ -510,10 +518,9 @@ private fun flowFromStream(inputStream: InputStream): Flow<String> = callbackFlo
     val job = CoroutineScope(CoroutineDispatchers.IO).launch {
         try {
             BufferedReader(InputStreamReader(inputStream)).use { reader ->
-                reader.lineSequence().forEach { line ->
-                    if (isActive) {
-                        trySend(line)
-                    }
+                while (isActive) {
+                    val line = reader.readLine() ?: break
+                    send(line)
                 }
             }
         } catch (e: IOException) {
