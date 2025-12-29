@@ -1,9 +1,10 @@
 /* METADATA
 {
   "name": "nanobanana_draw",
-  "description": "使用 Nano Banana API (基于Grsai的api服务/https://grsai.com/) 根据提示词画图，支持文生图和图生图（可传入参考图片URL进行图像编辑与合成），将图片保存到本地 /sdcard/Download/Operit/draws/ 目录，并返回 Markdown 图片提示。",
+  "description": "使用 Nano Banana API (基于Grsai的api服务/https://grsai.com/) 根据提示词画图，支持文生图和图生图（可传入参考图片URL或本地图片路径；本地图片会先上传到图床以获得公网URL），将图片保存到本地 /sdcard/Download/Operit/draws/ 目录，并返回 Markdown 图片提示。",
   "env": [
-    "NANOBANANA_API_KEY"
+    "NANOBANANA_API_KEY",
+    "BEEIMG_API_KEY"
   ],
   "tools": [
     {
@@ -15,6 +16,7 @@
         { "name": "aspect_ratio", "description": "输出图像比例，如 '1:1', '16:9', 'auto' 等，可选", "type": "string", "required": false },
         { "name": "image_size", "description": "输出图像大小，仅 nano-banana-pro 支持，如 '1K', '2K', '4K'，可选", "type": "string", "required": false },
         { "name": "image_urls", "description": "参考图URL数组（图生图），支持格式：字符串数组['https://...'] 或 JSON字符串'[\"https://...\"]' 或逗号分隔'url1,url2'，可选", "type": "array", "required": false },
+        { "name": "image_paths", "description": "参考图本地路径数组（图生图，会先上传图床再进行生成），支持格式：字符串数组['/sdcard/...'] 或 JSON字符串 或 逗号分隔，可选", "type": "array", "required": false },
         { "name": "file_name", "description": "自定义保存到本地的文件名（不含路径和扩展名）", "type": "string", "required": false }
       ]
     }
@@ -23,6 +25,7 @@
 */
 const nanobananaDraw = (function () {
     const client = OkHttp.newClient();
+    const BEEIMG_UPLOAD_ENDPOINT = "https://beeimg.com/api/upload/file/json/";
     // API配置
     const API_ENDPOINT = "https://grsai.dakka.com.cn/v1/draw/nano-banana";
     const RESULT_ENDPOINT = "https://grsai.dakka.com.cn/v1/draw/result";
@@ -40,6 +43,78 @@ const nanobananaDraw = (function () {
             throw new Error("NANOBANANA_API_KEY 未配置，请在环境变量中设置 Nano Banana 的 API Key。");
         }
         return apiKey;
+    }
+    function getBeeimgApiKey() {
+        return getEnv("BEEIMG_API_KEY") || "";
+    }
+    function guessMimeTypeFromPath(filePath) {
+        const lower = filePath.toLowerCase();
+        if (lower.endsWith(".png"))
+            return "image/png";
+        if (lower.endsWith(".jpg") || lower.endsWith(".jpeg"))
+            return "image/jpeg";
+        if (lower.endsWith(".webp"))
+            return "image/webp";
+        if (lower.endsWith(".gif"))
+            return "image/gif";
+        return "application/octet-stream";
+    }
+    function safeJsonParseLoose(text) {
+        const trimmed = (text || "").trim();
+        if (!trimmed)
+            return null;
+        try {
+            return JSON.parse(trimmed);
+        }
+        catch (e) {
+            const start = trimmed.indexOf("{");
+            const end = trimmed.lastIndexOf("}");
+            if (start !== -1 && end !== -1 && end > start) {
+                return JSON.parse(trimmed.substring(start, end + 1));
+            }
+            throw e;
+        }
+    }
+    async function uploadImageToBeeimg(filePath) {
+        const exists = await Tools.Files.exists(filePath);
+        if (!exists.exists) {
+            throw new Error(`参考图文件不存在: ${filePath}`);
+        }
+        const apiKey = getBeeimgApiKey();
+        if (!apiKey) {
+            throw new Error("使用 image_paths 需要配置 BEEIMG_API_KEY（用于把本地图片上传到图床以获得公网URL）。");
+        }
+        const resp = await Tools.Net.uploadFile({
+            url: BEEIMG_UPLOAD_ENDPOINT,
+            method: "POST",
+            form_data: {
+                apikey: apiKey
+            },
+            files: [
+                {
+                    field_name: "file",
+                    file_path: filePath,
+                    content_type: guessMimeTypeFromPath(filePath)
+                }
+            ]
+        });
+        if (resp.statusCode < 200 || resp.statusCode >= 300) {
+            throw new Error(`BeeIMG 上传失败: HTTP ${resp.statusCode} - ${resp.content}`);
+        }
+        let parsed;
+        try {
+            parsed = safeJsonParseLoose(resp.content);
+        }
+        catch (e) {
+            throw new Error(`BeeIMG 上传响应解析失败: ${(e === null || e === void 0 ? void 0 : e.message) || e}`);
+        }
+        const files = parsed === null || parsed === void 0 ? void 0 : parsed.files;
+        const ok = files && (files.status === "Success" || files.code === "200" || files.code === 200);
+        const url = files === null || files === void 0 ? void 0 : files.url;
+        if (!ok || !url) {
+            throw new Error(`BeeIMG 上传失败: ${resp.content}`);
+        }
+        return String(url);
     }
     function sanitizeFileName(name) {
         const safe = name.replace(/[\\/:*?"<>|]/g, "_").trim();
@@ -232,6 +307,29 @@ const nanobananaDraw = (function () {
             }
             return [];
         }
+        function parseImagePaths(image_paths) {
+            if (Array.isArray(image_paths)) {
+                return image_paths.filter(p => p && String(p).trim().length > 0).map(p => String(p).trim());
+            }
+            if (typeof image_paths === "string") {
+                try {
+                    const parsed = JSON.parse(image_paths);
+                    if (Array.isArray(parsed)) {
+                        return parsed.filter((p) => p && String(p).trim().length > 0).map((p) => String(p).trim());
+                    }
+                }
+                catch (e) {
+                    // ignore
+                }
+                const splitPaths = image_paths.split(",")
+                    .map(p => p.trim())
+                    .filter(p => p.length > 0);
+                if (splitPaths.length > 0) {
+                    return splitPaths;
+                }
+            }
+            return [];
+        }
         // 替换原有的验证逻辑
         let imageUrlsArray = [];
         if (params.image_urls) {
@@ -239,6 +337,21 @@ const nanobananaDraw = (function () {
             if (imageUrlsArray.length === 0) {
                 throw new Error("参数 image_urls 必须是有效的URL数组。");
             }
+        }
+        let imagePathsArray = [];
+        if (params.image_paths) {
+            imagePathsArray = parseImagePaths(params.image_paths);
+            if (imagePathsArray.length === 0) {
+                throw new Error("参数 image_paths 必须是有效的本地路径数组。");
+            }
+        }
+        if (imagePathsArray.length > 0) {
+            console.log(`检测到 ${imagePathsArray.length} 张本地参考图，开始上传以获得公网URL...`);
+            for (const p of imagePathsArray) {
+                const url = await uploadImageToBeeimg(p);
+                imageUrlsArray.push(url);
+            }
+            console.log("本地参考图上传完成。");
         }
         await ensureDirectories();
         // 步骤1: 提交任务并获取任务ID
@@ -276,6 +389,7 @@ const nanobananaDraw = (function () {
             aspect_ratio: params.aspect_ratio,
             image_size: params.image_size,
             image_urls: params.image_urls,
+            image_paths: params.image_paths,
             hint: hintLines.join("\n")
         };
     }

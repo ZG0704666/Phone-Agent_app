@@ -18,32 +18,30 @@
     ]
 }
 */
+
 const beeimgUploader = (function () {
     // API配置
     const API_ENDPOINT = "https://beeimg.com/api/upload/file/json/";
-    function getApiKey() {
+
+    function getApiKey(): string {
         return getEnv("BEEIMG_API_KEY") || "";
     }
-    function guessMimeTypeFromPath(filePath) {
+
+    function guessMimeTypeFromPath(filePath: string): string {
         const lower = filePath.toLowerCase();
-        if (lower.endsWith(".png"))
-            return "image/png";
-        if (lower.endsWith(".jpg") || lower.endsWith(".jpeg"))
-            return "image/jpeg";
-        if (lower.endsWith(".webp"))
-            return "image/webp";
-        if (lower.endsWith(".gif"))
-            return "image/gif";
+        if (lower.endsWith(".png")) return "image/png";
+        if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+        if (lower.endsWith(".webp")) return "image/webp";
+        if (lower.endsWith(".gif")) return "image/gif";
         return "application/octet-stream";
     }
-    function safeJsonParseLoose(text) {
+
+    function safeJsonParseLoose(text: string): any {
         const trimmed = (text || "").trim();
-        if (!trimmed)
-            return null;
+        if (!trimmed) return null;
         try {
             return JSON.parse(trimmed);
-        }
-        catch (e) {
+        } catch (e) {
             const start = trimmed.indexOf("{");
             const end = trimmed.lastIndexOf("}");
             if (start !== -1 && end !== -1 && end > start) {
@@ -52,30 +50,48 @@ const beeimgUploader = (function () {
             throw e;
         }
     }
-    async function upload_image(params) {
-        const { file_path, album_id, privacy } = params || {};
+
+    interface UploadImageParams {
+        file_path: string;
+        album_id?: string;
+        privacy?: string;
+    }
+
+    interface UploadImageResult {
+        url: string;
+        thumbnail_url?: string;
+        page_url?: string;
+        details: string;
+    }
+
+    async function upload_image(params: UploadImageParams): Promise<UploadImageResult> {
+        const { file_path, album_id, privacy } = params || ({} as any);
+
         if (!file_path || String(file_path).trim().length === 0) {
             throw new Error("参数 file_path 不能为空。");
         }
+
         // 1. 检查文件是否存在
         const fileExists = await Tools.Files.exists(file_path);
         if (!fileExists.exists) {
             throw new Error(`文件未找到: ${file_path} (请尝试使用 /sdcard/ 开头的绝对路径)`);
         }
+
         // 2. 准备参数
         const apiKey = getApiKey();
         if (!apiKey) {
             throw new Error("BEEIMG_API_KEY 未配置，请在环境变量中设置 BeeIMG 的 API Key。");
         }
-        const form_data = {
+
+        const form_data: Record<string, string> = {
             apikey: apiKey
         };
-        if (album_id)
-            form_data.albumid = String(album_id);
-        if (privacy)
-            form_data.privacy = String(privacy);
+        if (album_id) form_data.albumid = String(album_id);
+        if (privacy) form_data.privacy = String(privacy);
+
         // 3. 发起 multipart 上传
         console.log("正在执行上传...");
+
         const resp = await Tools.Net.uploadFile({
             url: API_ENDPOINT,
             method: "POST",
@@ -92,45 +108,50 @@ const beeimgUploader = (function () {
                 }
             ]
         });
+
         if (resp.statusCode < 200 || resp.statusCode >= 300) {
             throw new Error(`上传请求失败 (HTTP ${resp.statusCode})。可能是网络问题或 IP 被屏蔽。\n响应: ${resp.content}`);
         }
+
         const responseText = (resp.content || "").trim();
         if (!responseText) {
             throw new Error("上传失败：服务器返回了空内容。请检查网络连接或尝试关闭 VPN。");
         }
-        let jsonResponse;
+
+        let jsonResponse: any;
         try {
             jsonResponse = safeJsonParseLoose(responseText);
-        }
-        catch (e) {
+        } catch (e) {
             throw new Error(`API 响应解析失败。服务器返回内容不是 JSON:\n${responseText.substring(0, 200)}...`);
         }
-        if ((jsonResponse === null || jsonResponse === void 0 ? void 0 : jsonResponse.files) && (jsonResponse.files.status === "Success" || jsonResponse.files.code === "200" || jsonResponse.files.code === 200)) {
+
+        if (jsonResponse?.files && (jsonResponse.files.status === "Success" || jsonResponse.files.code === "200" || jsonResponse.files.code === 200)) {
             return {
                 url: String(jsonResponse.files.url),
                 thumbnail_url: jsonResponse.files.thumbnail_url ? String(jsonResponse.files.thumbnail_url) : undefined,
                 page_url: jsonResponse.files.view_url ? String(jsonResponse.files.view_url) : undefined,
                 details: `上传成功! URL: ${jsonResponse.files.url}`
             };
-        }
-        else {
-            const errMsg = (jsonResponse === null || jsonResponse === void 0 ? void 0 : jsonResponse.files) ? (jsonResponse.files.status || jsonResponse.files.message || JSON.stringify(jsonResponse.files)) : "未知错误";
+        } else {
+            const errMsg = jsonResponse?.files ? (jsonResponse.files.status || jsonResponse.files.message || JSON.stringify(jsonResponse.files)) : "未知错误";
             throw new Error(`BeeIMG API 报错: ${errMsg}`);
         }
     }
-    async function wrap(func, params) {
+
+    async function wrap(func: (params: any) => Promise<any>, params: any) {
         try {
             const result = await func(params);
             complete({ success: true, message: "图片上传成功", data: result });
         }
-        catch (error) {
-            console.error(`Error: ${(error === null || error === void 0 ? void 0 : error.message) || error}`);
-            complete({ success: false, message: (error === null || error === void 0 ? void 0 : error.message) || String(error), error_stack: error === null || error === void 0 ? void 0 : error.stack });
+        catch (error: any) {
+            console.error(`Error: ${error?.message || error}`);
+            complete({ success: false, message: error?.message || String(error), error_stack: error?.stack });
         }
     }
+
     return {
-        upload_image: (p) => wrap(upload_image, p)
+        upload_image: (p: UploadImageParams) => wrap(upload_image, p)
     };
 })();
+
 exports.upload_image = beeimgUploader.upload_image;
