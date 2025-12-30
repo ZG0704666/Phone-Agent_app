@@ -182,10 +182,8 @@ object PatchUpdateInstaller {
         val installedBase = baseVersionOf(installedVersionName)
         val hasInstalledVersion = installedVersionName.isNotBlank() && installedBase.isNotBlank()
 
-        var stop = false
-
-        for (page in 1..5) {
-            val res = api.getRepositoryReleases(owner = PATCH_OWNER, repo = PATCH_REPO, page = page, perPage = 30)
+        for (page in 1..2) {
+            val res = api.getRepositoryReleases(owner = PATCH_OWNER, repo = PATCH_REPO, page = page, perPage = 100)
             val releases = res.getOrNull() ?: break
             if (releases.isEmpty()) break
 
@@ -200,8 +198,7 @@ object PatchUpdateInstaller {
                         continue
                     }
                     if (UpdateManager.compareVersions(version, installedVersionName) <= 0) {
-                        stop = true
-                        break
+                        continue
                     }
                 }
 
@@ -241,8 +238,6 @@ object PatchUpdateInstaller {
                     )
                 )
             }
-
-            if (stop) break
         }
 
         val workDir = File(context.cacheDir, "patch_update").apply { mkdirs() }

@@ -316,6 +316,12 @@ class UpdateManager private constructor(private val context: Context) {
         AppLogger.d(TAG, "tryFetchLatestPatchUpdate(): fetched releases=${releases.size}")
         val currentBase = baseVersionOf(currentVersion)
 
+        var matchedBase = 0
+        var newerThanCurrent = 0
+        var withAssets = 0
+        var best: UpdateStatus.PatchAvailable? = null
+        var bestVersion = ""
+
         for (r in releases) {
             if (r.draft) continue
 
@@ -328,9 +334,13 @@ class UpdateManager private constructor(private val context: Context) {
                 continue
             }
 
+            matchedBase += 1
+
             if (compareVersions(version, currentVersion) <= 0) {
-                break
+                continue
             }
+
+            newerThanCurrent += 1
 
             val metaAsset =
                 r.assets.firstOrNull { it.name.startsWith("patch_") && it.name.endsWith(".json") }
@@ -346,21 +356,33 @@ class UpdateManager private constructor(private val context: Context) {
                 continue
             }
 
+            withAssets += 1
+
             AppLogger.d(
                 TAG,
                 "patch candidate: tag=$tag version=$version patch=${patchAsset.name} meta=${metaAsset.name}"
             )
 
-            return UpdateStatus.PatchAvailable(
-                newVersion = version,
-                updateUrl = r.html_url,
-                releaseNotes = r.body ?: "",
-                patchUrl = patchAsset.browser_download_url,
-                metaUrl = metaAsset.browser_download_url
-            )
+            if (best == null || compareVersions(version, bestVersion) > 0) {
+                bestVersion = version
+                best = UpdateStatus.PatchAvailable(
+                    newVersion = version,
+                    updateUrl = r.html_url,
+                    releaseNotes = r.body ?: "",
+                    patchUrl = patchAsset.browser_download_url,
+                    metaUrl = metaAsset.browser_download_url
+                )
+            }
         }
 
-        AppLogger.d(TAG, "tryFetchLatestPatchUpdate(): no valid patch candidates")
-        return null
+        AppLogger.d(
+            TAG,
+            "tryFetchLatestPatchUpdate(): scan done matchedBase=$matchedBase newerThanCurrent=$newerThanCurrent withAssets=$withAssets best=$bestVersion"
+        )
+
+        if (best == null) {
+            AppLogger.d(TAG, "tryFetchLatestPatchUpdate(): no valid patch candidates")
+        }
+        return best
     }
 }

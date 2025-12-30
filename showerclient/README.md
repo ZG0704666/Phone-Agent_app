@@ -62,18 +62,47 @@ class YourApplication : Application() {
 
 Shower server 启动后，会通过广播把 `IShowerService` 的 `IBinder` 发送给客户端。宿主 App 需要在广播接收器中把它交给本库：
 
+广播协议（与主项目保持一致）：
+
+ - **Action**：`com.ai.assistance.operit.action.SHOWER_BINDER_READY`
+ - **Extra key**：`binder_container`
+ - **Extra 类型**：`com.ai.assistance.shower.ShowerBinderContainer`（`Parcelable`，内部包含 `IBinder`）
+
 ```kotlin
 class ShowerBinderReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        val container = intent.getParcelableExtra<ShowerBinderContainer>("EXTRA_SHOWER_BINDER")
+        if (intent.action != ACTION_SHOWER_BINDER_READY) return
+
+        val container = intent.getParcelableExtra<ShowerBinderContainer>(EXTRA_BINDER_CONTAINER)
         val binder = container?.binder ?: return
         val service = IShowerService.Stub.asInterface(binder)
         ShowerBinderRegistry.setService(service)
     }
+
+    companion object {
+        const val ACTION_SHOWER_BINDER_READY =
+            "com.ai.assistance.operit.action.SHOWER_BINDER_READY"
+        const val EXTRA_BINDER_CONTAINER = "binder_container"
+    }
 }
 ```
 
-在 `AndroidManifest.xml` 注册这个 Receiver，并根据你的实际约定填写 Action / Extra 名称即可。
+在 `AndroidManifest.xml` 注册 Receiver（**需要 `exported=true`**，因为广播发送端运行在独立的 shower-server 进程里）：
+
+```xml
+<receiver
+    android:name=".ShowerBinderReceiver"
+    android:exported="true">
+    <intent-filter>
+        <action android:name="com.ai.assistance.operit.action.SHOWER_BINDER_READY" />
+    </intent-filter>
+</receiver>
+```
+
+说明：
+
+ - shower-server 会先用 `PackageManager.queryBroadcastReceivers(Intent(ACTION_SHOWER_BINDER_READY))` 找到能接收该 Action 的 Receiver，然后逐个 `setComponent()` 发送**显式广播**；如果没找到 receiver，才会 fallback 到一次隐式 `sendBroadcast()`。
+ - 因此宿主 App 侧的关键是：**Manifest 里声明 intent-filter 的 action 必须匹配**，并在 `onReceive()` 里把 `ShowerBinderContainer` 交给 `ShowerBinderRegistry.setService()`。
 
 ---
 

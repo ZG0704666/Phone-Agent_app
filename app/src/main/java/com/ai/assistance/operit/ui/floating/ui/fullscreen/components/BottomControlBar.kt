@@ -502,13 +502,7 @@ private fun BackButton(
 ) {
     IconButton(
         onClick = {
-            val targetMode = if (floatContext.previousMode == FloatingMode.FULLSCREEN || 
-                                 floatContext.previousMode == FloatingMode.VOICE_BALL) {
-                FloatingMode.WINDOW
-            } else {
-                floatContext.previousMode
-            }
-            floatContext.onModeChange(targetMode)
+            floatContext.onModeChange(FloatingMode.WINDOW)
         },
         modifier = modifier.size(42.dp)
     ) {

@@ -172,17 +172,9 @@ fun FloatingFullscreenMode(floatContext: FloatContext) {
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // 返回窗口模式（或上一个模式）
+            // 返回窗口模式
             IconButton(onClick = {
-                val targetMode =
-                    if (floatContext.previousMode == FloatingMode.FULLSCREEN ||
-                        floatContext.previousMode == FloatingMode.VOICE_BALL
-                    ) {
-                        FloatingMode.WINDOW
-                    } else {
-                        floatContext.previousMode
-                    }
-                floatContext.onModeChange(targetMode)
+                floatContext.onModeChange(FloatingMode.WINDOW)
             }) {
                 Icon(
                     imageVector = Icons.Default.KeyboardArrowDown,
