@@ -364,6 +364,14 @@ fun ChatHistorySelector(
     }
 
     if (chatItemActionTarget != null) {
+        val resolvedTargetChat = remember(chatItemActionTarget, chatHistories) {
+            val target = chatItemActionTarget
+            if (target == null) {
+                null
+            } else {
+                chatHistories.firstOrNull { it.id == target.id } ?: target
+            }
+        }
         Dialog(onDismissRequest = { chatItemActionTarget = null }) {
             Card(
                 modifier = Modifier
@@ -389,7 +397,7 @@ fun ChatHistorySelector(
                     )
 
                     Text(
-                        text = chatItemActionTarget!!.title,
+                        text = resolvedTargetChat?.title ?: chatItemActionTarget!!.title,
                         style = MaterialTheme.typography.titleMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp),
@@ -544,14 +552,14 @@ fun ChatHistorySelector(
                             .clip(MaterialTheme.shapes.medium)
                             .semantics {
                                 contentDescription =
-                                    if (chatItemActionTarget!!.locked) {
+                                    if (resolvedTargetChat?.locked == true) {
                                         context.getString(R.string.unlock_chat)
                                     } else {
                                         context.getString(R.string.lock_chat)
                                     }
                             }
                             .clickable {
-                                val targetChat = chatItemActionTarget!!
+                                val targetChat = resolvedTargetChat ?: chatItemActionTarget!!
                                 val newLocked = !targetChat.locked
                                 coroutineScope.launch {
                                     chatHistoryManager.updateChatLocked(targetChat.id, newLocked)
@@ -567,7 +575,7 @@ fun ChatHistorySelector(
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Icon(
-                                imageVector = if (chatItemActionTarget!!.locked) Icons.Default.LockOpen else Icons.Default.Lock,
+                                imageVector = if (resolvedTargetChat?.locked == true) Icons.Default.LockOpen else Icons.Default.Lock,
                                 contentDescription = null,
                                 tint = MaterialTheme.colorScheme.primary,
                                 modifier = Modifier
@@ -576,7 +584,7 @@ fun ChatHistorySelector(
                             )
                             Spacer(modifier = Modifier.width(16.dp))
                             Text(
-                                text = if (chatItemActionTarget!!.locked) stringResource(R.string.unlock_chat) else stringResource(R.string.lock_chat),
+                                text = if (resolvedTargetChat?.locked == true) stringResource(R.string.unlock_chat) else stringResource(R.string.lock_chat),
                                 style = MaterialTheme.typography.bodyLarge,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 modifier = Modifier.clearAndSetSemantics {}
